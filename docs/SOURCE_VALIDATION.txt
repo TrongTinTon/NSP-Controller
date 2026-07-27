@@ -1,0 +1,30 @@
+NSP Gatekeeper Controller v1.1.0 - Static Validation
+Generated: 2026-07-27
+
+Validated against current NSP Odoo API source:
+- POST /auth/token
+- POST /auth/refresh
+- POST /v1/heartbeat
+- POST /v1/controller/device-config/pull
+- POST /v1/devices/report
+- POST /v1/parking/detections/push
+- POST /v1/controller/measurement/pull
+- POST /v1/controller/measurement/events
+- POST /v1/controller/measurement/status
+
+Checks:
+- C# source files: 15; delimiter/string/comment balance errors: 0
+- App.config XML: OK
+- NSPGatekeeper.Controller.csproj XML: OK
+- Current Controller API route strings present: OK
+- Legacy auth/routing markers in CoreApiClient: 0
+  grant_type / gateway_base / service_code / X-Client-ID / X-Controller-ID
+- Parking business-decision markers in executable C# code: 0
+  check_in / check_out / borrower / friendship / unauthorized_vehicle_user / missing_user_tid
+- LocalStore public call references: resolved
+- CoreApiClient runtime call references: resolved
+- Local DB table references: current technical tables only
+
+Important limitation:
+The validation sandbox does not contain dotnet, MSBuild, CSC or Mono C# compiler.
+The source has therefore NOT been compiled or executed against a physical RFID Reader in this environment.

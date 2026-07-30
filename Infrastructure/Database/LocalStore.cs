@@ -161,9 +161,9 @@ UPDATE controller_reader
             if (status == null || string.IsNullOrWhiteSpace(status.SerialNumber)) return;
             const string sql = @"
 INSERT INTO controller_reader_runtime_status
-(serial_number, driver_key, model, endpoint, online, message, firmware_version, antennas_json, config_revision, updated_at)
+(serial_number, driver_key, model, endpoint, online, message, firmware_version, power_dbm, read_interval_ms, antennas_json, config_revision, updated_at)
 VALUES
-(@serial_number, @driver_key, @model, @endpoint, @online, @message, @firmware_version, CAST(@antennas_json AS jsonb), @config_revision, @updated_at)
+(@serial_number, @driver_key, @model, @endpoint, @online, @message, @firmware_version, @power_dbm, @read_interval_ms, CAST(@antennas_json AS jsonb), @config_revision, @updated_at)
 ON CONFLICT (serial_number) DO UPDATE SET
  driver_key=EXCLUDED.driver_key,
  model=EXCLUDED.model,
@@ -171,6 +171,8 @@ ON CONFLICT (serial_number) DO UPDATE SET
  online=EXCLUDED.online,
  message=EXCLUDED.message,
  firmware_version=EXCLUDED.firmware_version,
+ power_dbm=EXCLUDED.power_dbm,
+ read_interval_ms=EXCLUDED.read_interval_ms,
  antennas_json=EXCLUDED.antennas_json,
  config_revision=EXCLUDED.config_revision,
  updated_at=EXCLUDED.updated_at;";
@@ -184,6 +186,8 @@ ON CONFLICT (serial_number) DO UPDATE SET
                 cmd.Parameters.AddWithValue("online", status.Online);
                 AddText(cmd, "message", status.Message);
                 AddText(cmd, "firmware_version", status.FirmwareVersion);
+                cmd.Parameters.AddWithValue("power_dbm", Math.Max(0, Math.Min(40, status.PowerDbm)));
+                cmd.Parameters.AddWithValue("read_interval_ms", Math.Max(1, Math.Min(60000, status.ReadIntervalMs)));
                 cmd.Parameters.AddWithValue("antennas_json", JsonConvert.SerializeObject(status.Antennas ?? new List<int>()));
                 cmd.Parameters.AddWithValue("config_revision", status.ConfigRevision);
                 cmd.Parameters.AddWithValue("updated_at", NormalizeUtc(status.UpdatedAtUtc));
@@ -195,7 +199,7 @@ ON CONFLICT (serial_number) DO UPDATE SET
         {
             const string sql = @"
 SELECT s.serial_number, s.driver_key, s.model, s.endpoint, s.online, s.message, s.firmware_version,
-       s.antennas_json::text, s.updated_at, s.config_revision
+       s.power_dbm, s.read_interval_ms, s.antennas_json::text, s.updated_at, s.config_revision
   FROM controller_reader_runtime_status s
   JOIN controller_reader r ON r.serial_number = s.serial_number
  WHERE r.enabled = TRUE
@@ -218,9 +222,11 @@ SELECT s.serial_number, s.driver_key, s.model, s.endpoint, s.online, s.message, 
                         Online = reader.GetBoolean(4),
                         Message = GetNullableString(reader, 5),
                         FirmwareVersion = GetNullableString(reader, 6),
-                        Antennas = JsonConvert.DeserializeObject<List<int>>(reader.GetString(7)) ?? new List<int>(),
-                        UpdatedAtUtc = reader.GetDateTime(8).ToUniversalTime(),
-                        ConfigRevision = reader.GetInt32(9)
+                        PowerDbm = reader.GetInt32(7),
+                        ReadIntervalMs = reader.GetInt32(8),
+                        Antennas = JsonConvert.DeserializeObject<List<int>>(reader.GetString(9)) ?? new List<int>(),
+                        UpdatedAtUtc = reader.GetDateTime(10).ToUniversalTime(),
+                        ConfigRevision = reader.GetInt32(11)
                     });
                 }
             }
@@ -322,9 +328,9 @@ SELECT id, event_uid, controller_code, serial_number, antenna_no, tid, detected_
             if (events == null || events.Count == 0) return;
             const string sql = @"
 INSERT INTO controller_measurement_outbox
-(event_uid, measurement_code, serial_number, antenna_no, tid, rssi_dbm, read_at)
+(event_uid, measurement_code, revision, power_dbm, read_interval_ms, serial_number, antenna_no, tid, rssi_dbm, read_at)
 VALUES
-(@event_uid, @measurement_code, @serial_number, @antenna_no, @tid, @rssi_dbm, @read_at)
+(@event_uid, @measurement_code, @revision, @power_dbm, @read_interval_ms, @serial_number, @antenna_no, @tid, @rssi_dbm, @read_at)
 ON CONFLICT (event_uid) DO NOTHING;";
             using (var conn = Open())
             using (var tx = conn.BeginTransaction())
@@ -336,6 +342,9 @@ ON CONFLICT (event_uid) DO NOTHING;";
                     cmd.Parameters.Clear();
                     AddText(cmd, "event_uid", evt.EventUid);
                     AddText(cmd, "measurement_code", evt.MeasurementCode);
+                    cmd.Parameters.AddWithValue("revision", Math.Max(1, evt.Revision));
+                    cmd.Parameters.AddWithValue("power_dbm", Math.Max(0, evt.PowerDbm));
+                    cmd.Parameters.AddWithValue("read_interval_ms", Math.Max(1, Math.Min(60000, evt.ReadIntervalMs)));
                     AddText(cmd, "serial_number", evt.SerialNumber);
                     cmd.Parameters.AddWithValue("antenna_no", evt.AntennaNo);
                     AddText(cmd, "tid", evt.Tid);
@@ -351,7 +360,7 @@ ON CONFLICT (event_uid) DO NOTHING;";
         public IList<MeasurementOutboxItem> GetPendingMeasurementEvents(int limit)
         {
             const string sql = @"
-SELECT id, event_uid, measurement_code, serial_number, antenna_no, tid, rssi_dbm, read_at, attempts
+SELECT id, event_uid, measurement_code, revision, power_dbm, read_interval_ms, serial_number, antenna_no, tid, rssi_dbm, read_at, attempts
   FROM controller_measurement_outbox
  WHERE status='pending' AND next_attempt_at <= NOW()
  ORDER BY id
@@ -372,13 +381,16 @@ SELECT id, event_uid, measurement_code, serial_number, antenna_no, tid, rssi_dbm
                             {
                                 EventUid = reader.GetString(1),
                                 MeasurementCode = reader.GetString(2),
-                                SerialNumber = reader.GetString(3),
-                                AntennaNo = reader.GetInt32(4),
-                                Tid = reader.GetString(5),
-                                RssiDbm = reader.IsDBNull(6) ? (double?)null : reader.GetDouble(6),
-                                ReadAtUtc = reader.GetDateTime(7).ToUniversalTime()
+                                Revision = reader.GetInt32(3),
+                                PowerDbm = reader.GetInt32(4),
+                                ReadIntervalMs = reader.GetInt32(5),
+                                SerialNumber = reader.GetString(6),
+                                AntennaNo = reader.GetInt32(7),
+                                Tid = reader.GetString(8),
+                                RssiDbm = reader.IsDBNull(9) ? (double?)null : reader.GetDouble(9),
+                                ReadAtUtc = reader.GetDateTime(10).ToUniversalTime()
                             },
-                            Attempts = reader.GetInt32(8)
+                            Attempts = reader.GetInt32(11)
                         });
                     }
                 }

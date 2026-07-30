@@ -195,7 +195,8 @@ namespace NSPGatekeeper.Controller.Services
                 return;
             }
 
-            var isNew = !string.Equals(currentCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase);
+            var isNew = !string.Equals(currentCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase)
+                        || _readers.CurrentMeasurementRevision != config.Revision;
             _readers.ApplyMeasurementConfiguration(config);
 
             // Ready -> Running is explicitly reported once. Subsequent polls receive status=running.

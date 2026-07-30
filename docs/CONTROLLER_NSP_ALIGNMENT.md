@@ -33,7 +33,7 @@ This source is aligned to the current NSP Controller responsibility boundary:
 
 ## Important physical connection rule
 
-The current Edge Controller Device Config payload provides Reader Serial Number, technical Reader parameters, and antenna thresholds, but not the physical IP/COM endpoint. Therefore Driver/Endpoint/Port are preserved locally by Serial Number. The built-in CF-E718 adapter supports empty Endpoint as SDK Auto COM discovery.
+The current Edge Controller Device Config payload provides Reader Serial Number, technical Reader operation parameters and physical antenna declarations, but not the physical IP/COM endpoint. Therefore Driver/Endpoint/Port are preserved locally by Serial Number. The built-in CF-E718 adapter supports empty Endpoint as SDK Auto COM discovery.
 
 ## Validation status
 

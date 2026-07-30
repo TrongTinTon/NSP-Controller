@@ -177,7 +177,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                     DetectedAtUtc = DateTime.UtcNow
                 };
 
-                if (!IsRssiAccepted(antennaId, detection.RssiDbm)) return;
 
                 var handler = DetectionReceived;
                 if (handler != null) handler(detection);
@@ -344,15 +343,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
         private void UpdateIdentityFromReader(ref byte comAddress, int handle)
         {
-            string observedSerial = null;
             string firmwareVersion = null;
-            try
-            {
-                var serialBytes = new byte[4];
-                if (Cfe718Native.GetSeriaNo(ref comAddress, serialBytes, handle) == 0)
-                    observedSerial = string.Concat(serialBytes.Select(x => x.ToString("X2", CultureInfo.InvariantCulture)));
-            }
-            catch { }
             try
             {
                 var module = new byte[32];
@@ -366,17 +357,9 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             lock (_statusGate)
             {
-                // SerialNumber in Controller→Edge payloads must remain the canonical
-                // server-configured hardware identity. Some SDK versions expose a
-                // different 4-byte serial representation; never replace the server key.
-                if (!string.IsNullOrWhiteSpace(observedSerial) &&
-                    !string.IsNullOrWhiteSpace(_config.SerialNumber) &&
-                    !string.Equals(observedSerial, _config.SerialNumber, StringComparison.OrdinalIgnoreCase) &&
-                    _logger != null)
-                {
-                    _logger.Warn("reader-cf-e718", "SDK serial differs from configured serial; keeping configured identity",
-                        "configured=" + _config.SerialNumber + "; sdk=" + observedSerial);
-                }
+                // The serial configured by NSP Server is the canonical physical Reader
+                // identity. GetSeriaNo() exposes a vendor/module value that may differ
+                // from the chassis label, so it must not be used for identity validation.
                 _status.SerialNumber = _config.SerialNumber;
                 _status.Model = string.IsNullOrWhiteSpace(_config.Model) ? "CF-E718" : _config.Model;
                 if (!string.IsNullOrWhiteSpace(firmwareVersion)) _status.FirmwareVersion = firmwareVersion;
@@ -388,14 +371,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             if (antennaId <= 0) return false;
             return (_config.Antennas ?? new List<ReaderAntennaConfig>())
                 .Any(x => x != null && x.Enabled && x.AntennaId == antennaId);
-        }
-
-        private bool IsRssiAccepted(int antennaId, double? rssiDbm)
-        {
-            if (!rssiDbm.HasValue) return true;
-            var antenna = (_config.Antennas ?? new List<ReaderAntennaConfig>())
-                .FirstOrDefault(x => x != null && x.Enabled && x.AntennaId == antennaId);
-            return antenna != null && (!antenna.MinimumRssiDbm.HasValue || rssiDbm.Value >= antenna.MinimumRssiDbm.Value);
         }
 
         private IList<int> EnabledAntennas()
@@ -523,8 +498,13 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
         private void Wait(int milliseconds)
         {
-            if (milliseconds <= 0) return;
-            if (_cts.Token.WaitHandle.WaitOne(milliseconds)) throw new OperationCanceledException(_cts.Token);
+            if (milliseconds <= 0 || _cts.IsCancellationRequested) return;
+
+            // Cancellation is a normal runtime shutdown/restart signal. WaitOne returns
+            // immediately when Stop() cancels the token, so no exception is required to
+            // wake this reader thread. The surrounding loops re-check the token before
+            // performing another inventory or reconnect attempt.
+            _cts.Token.WaitHandle.WaitOne(milliseconds);
         }
 
         private static string Clean(string value)

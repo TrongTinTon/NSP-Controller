@@ -8,7 +8,6 @@ namespace NSPGatekeeper.Controller.Domain
     {
         public int AntennaId { get; set; }
         public bool Enabled { get; set; }
-        public double? MinimumRssiDbm { get; set; }
     }
 
     public sealed class ReaderDeviceConfig
@@ -82,6 +81,8 @@ namespace NSPGatekeeper.Controller.Domain
         public string Message { get; set; }
         public string FirmwareVersion { get; set; }
         public int ConfigRevision { get; set; }
+        public int PowerDbm { get; set; }
+        public int ReadIntervalMs { get; set; }
         public DateTime UpdatedAtUtc { get; set; }
         public IList<int> Antennas { get; set; }
 
@@ -105,32 +106,54 @@ namespace NSPGatekeeper.Controller.Domain
         public string ControllerCode { get; set; }
         public string Status { get; set; }
         public string DesiredState { get; set; }
+        public int Revision { get; set; }
         public DateTime? PlannedStartAtUtc { get; set; }
         public DateTime? PlannedEndAtUtc { get; set; }
         public string Note { get; set; }
-        public IList<MeasurementAntennaConfig> Antennas { get; set; }
+        public IList<MeasurementReaderConfig> Readers { get; set; }
 
         public MeasurementSessionConfig()
         {
-            Antennas = new List<MeasurementAntennaConfig>();
+            Revision = 1;
+            Readers = new List<MeasurementReaderConfig>();
         }
 
         public bool IsRunningDesired
         {
             get { return Available && string.Equals(DesiredState, "running", StringComparison.OrdinalIgnoreCase); }
         }
+
+        public MeasurementReaderConfig Reader(string serialNumber)
+        {
+            var serial = (serialNumber ?? string.Empty).Trim();
+            return (Readers ?? new List<MeasurementReaderConfig>())
+                .FirstOrDefault(x => x != null && string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
+        }
+
     }
 
-    public sealed class MeasurementAntennaConfig
+    public sealed class MeasurementReaderConfig
     {
         public string SerialNumber { get; set; }
-        public int AntennaNo { get; set; }
+        public int PowerDbm { get; set; }
+        public int ReadIntervalMs { get; set; }
+        public IList<int> Antennas { get; set; }
+
+        public MeasurementReaderConfig()
+        {
+            PowerDbm = 30;
+            ReadIntervalMs = 200;
+            Antennas = new List<int>();
+        }
     }
 
     public sealed class MeasurementEvent
     {
         public string EventUid { get; set; }
         public string MeasurementCode { get; set; }
+        public int Revision { get; set; }
+        public int PowerDbm { get; set; }
+        public int ReadIntervalMs { get; set; }
         public string SerialNumber { get; set; }
         public int AntennaNo { get; set; }
         public string Tid { get; set; }

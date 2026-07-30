@@ -178,8 +178,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                         config.Antennas.Add(new ReaderAntennaConfig
                         {
                             AntennaId = antennaNo,
-                            Enabled = true,
-                            MinimumRssiDbm = ant.Value<double?>("minimum_rssi_dbm")
+                            Enabled = true
                         });
                     }
                 }
@@ -207,7 +206,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     // Do not reuse the timestamp from the original connect transition, or
                     // Edge's offline cron would eventually mark a healthy Reader offline.
                     ["last_seen_at"] = reportedSeenAt.ToUniversalTime().ToString("o"),
-                    ["firmware_version"] = status.FirmwareVersion ?? string.Empty
+                    ["firmware_version"] = status.FirmwareVersion ?? string.Empty,
+                    ["power_dbm"] = Math.Max(0, Math.Min(40, status.PowerDbm)),
+                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, status.ReadIntervalMs))
                 });
             }
 
@@ -264,28 +265,40 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 ControllerCode = Clean((string)payload["controller_code"]),
                 Status = Clean((string)payload["status"]),
                 DesiredState = Clean((string)payload["desired_state"]),
+                Revision = payload.Value<int?>("revision") ?? 1,
                 PlannedStartAtUtc = ParseUtc((string)payload["planned_start_at"]),
                 PlannedEndAtUtc = ParseUtc((string)payload["planned_end_at"]),
                 Note = Clean((string)payload["note"])
             };
 
-            var groups = payload["measurement_antennas"] as JArray;
-            if (groups != null)
+            var readers = payload["readers"] as JArray;
+            if (readers != null)
             {
-                foreach (var group in groups.OfType<JObject>())
+                foreach (var reader in readers.OfType<JObject>())
                 {
-                    var serial = Clean((string)group["serial_number"]);
-                    var antennaNumbers = group["antennas"] as JArray;
-                    if (string.IsNullOrWhiteSpace(serial) || antennaNumbers == null) continue;
-                    foreach (var number in antennaNumbers)
+                    var serial = Clean((string)reader["serial_number"]).ToUpperInvariant();
+                    if (string.IsNullOrWhiteSpace(serial)) continue;
+                    var readerConfig = new MeasurementReaderConfig
                     {
-                        int antennaNo;
-                        if (!int.TryParse(number.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out antennaNo) || antennaNo <= 0) continue;
-                        config.Antennas.Add(new MeasurementAntennaConfig
+                        SerialNumber = serial,
+                        PowerDbm = Math.Max(0, Math.Min(40, reader.Value<int?>("power_dbm") ?? 30)),
+                        ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.Value<int?>("read_interval_ms") ?? 200))
+                    };
+                    var antennaNumbers = reader["antennas"] as JArray;
+                    if (antennaNumbers != null)
+                    {
+                        foreach (var number in antennaNumbers)
                         {
-                            SerialNumber = serial.ToUpperInvariant(),
-                            AntennaNo = antennaNo
-                        });
+                            int antennaNo;
+                            if (!int.TryParse(number.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out antennaNo) || antennaNo <= 0) continue;
+                            if (!readerConfig.Antennas.Contains(antennaNo))
+                                readerConfig.Antennas.Add(antennaNo);
+                        }
+                    }
+                    if (readerConfig.Antennas.Count > 0
+                        && !config.Readers.Any(x => string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        config.Readers.Add(readerConfig);
                     }
                 }
             }
@@ -301,6 +314,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 var payload = new JObject
                 {
                     ["event_uid"] = item.EventUid,
+                    ["revision"] = Math.Max(1, item.Revision),
+                    ["power_dbm"] = Math.Max(0, item.PowerDbm),
+                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, item.ReadIntervalMs)),
                     ["serial_number"] = item.SerialNumber,
                     ["antenna_no"] = item.AntennaNo,
                     ["tid"] = item.Tid,

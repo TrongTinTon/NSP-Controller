@@ -52,6 +52,15 @@ namespace NSPGatekeeper.Controller.Services
             }
         }
 
+        public int CurrentMeasurementRevision
+        {
+            get
+            {
+                lock (_gate) return _measurement == null ? 0 : _measurement.Revision;
+            }
+        }
+
+
         public void StartCachedConfiguration()
         {
             ApplyRuntimeConfiguration(_store.GetDeviceConfigs());
@@ -81,41 +90,96 @@ namespace NSPGatekeeper.Controller.Services
 
             foreach (var config in merged) _store.UpsertDeviceConfig(config);
             _store.DisableDevicesNotIn(merged.Select(x => x.SerialNumber).ToList());
-            ApplyRuntimeConfiguration(merged);
+
+            MeasurementSessionConfig measurement;
+            lock (_gate) measurement = _measurement;
+            ApplyRuntimeConfiguration(BuildEffectiveConfigs(merged, measurement));
         }
 
         public void ApplyMeasurementConfiguration(MeasurementSessionConfig config)
         {
+            if (config == null || !config.IsRunningDesired || string.IsNullOrWhiteSpace(config.MeasurementCode))
+            {
+                ClearMeasurement("server_stopped");
+                return;
+            }
+
+            config.MeasurementCode = (config.MeasurementCode ?? string.Empty).Trim().ToUpperInvariant();
+            if (config.Revision <= 0) config.Revision = 1;
+            config.Readers = (config.Readers ?? new List<MeasurementReaderConfig>())
+                .Where(x => x != null && !string.IsNullOrWhiteSpace(x.SerialNumber))
+                .Select(x => new MeasurementReaderConfig
+                {
+                    SerialNumber = x.SerialNumber.Trim().ToUpperInvariant(),
+                    PowerDbm = Math.Max(0, Math.Min(40, x.PowerDbm)),
+                    ReadIntervalMs = Math.Max(1, Math.Min(60000, x.ReadIntervalMs)),
+                    Antennas = (x.Antennas ?? new List<int>())
+                        .Where(number => number > 0)
+                        .Distinct()
+                        .OrderBy(number => number)
+                        .ToList()
+                })
+                .Where(x => x.Antennas.Count > 0)
+                .GroupBy(x => x.SerialNumber, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(x => x.SerialNumber, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            bool changed;
             lock (_gate)
             {
-                if (config == null || !config.IsRunningDesired || string.IsNullOrWhiteSpace(config.MeasurementCode))
-                {
-                    ClearMeasurementLocked("server_stopped");
-                    return;
-                }
+                var newPairs = new HashSet<string>(
+                    config.Readers.SelectMany(reader =>
+                        reader.Antennas.Select(antennaNo => PairKey(reader.SerialNumber, antennaNo))),
+                    StringComparer.OrdinalIgnoreCase);
+                var newReaders = new HashSet<string>(
+                    config.Readers.Select(reader => reader.SerialNumber),
+                    StringComparer.OrdinalIgnoreCase);
+                changed = _measurement == null
+                          || !string.Equals(_measurement.MeasurementCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase)
+                          || _measurement.Revision != config.Revision
+                          || !string.Equals(MeasurementReaderSignature(_measurement), MeasurementReaderSignature(config), StringComparison.Ordinal);
 
-                var changed = _measurement == null ||
-                              !string.Equals(_measurement.MeasurementCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase);
                 _measurement = config;
-                _measurementReaders = new HashSet<string>(
-                    (config.Antennas ?? new List<MeasurementAntennaConfig>())
-                        .Where(x => x != null && !string.IsNullOrWhiteSpace(x.SerialNumber))
-                        .Select(x => x.SerialNumber.Trim().ToUpperInvariant()),
-                    StringComparer.OrdinalIgnoreCase);
-                _measurementPairs = new HashSet<string>(
-                    (config.Antennas ?? new List<MeasurementAntennaConfig>())
-                        .Where(x => x != null && !string.IsNullOrWhiteSpace(x.SerialNumber) && x.AntennaNo > 0)
-                        .Select(x => PairKey(x.SerialNumber, x.AntennaNo)),
-                    StringComparer.OrdinalIgnoreCase);
-
-                if (changed && _logger != null)
-                    _logger.Info("measurement", "Measurement mode enabled", "code=" + config.MeasurementCode + "; readers=" + _measurementReaders.Count + "; antennas=" + _measurementPairs.Count);
+                _measurementReaders = newReaders;
+                _measurementPairs = newPairs;
             }
+
+            if (changed)
+            {
+                ApplyRuntimeConfiguration(BuildEffectiveConfigs(_store.GetDeviceConfigs(), config));
+                if (_logger != null)
+                    _logger.Info(
+                        "measurement",
+                        "Measurement runtime applied",
+                        "code=" + config.MeasurementCode
+                        + "; revision=" + config.Revision
+                        + "; readers=" + config.Readers.Count
+                        + "; antennas=" + _measurementPairs.Count);
+            }
+        }
+
+
+        private static string MeasurementReaderSignature(MeasurementSessionConfig config)
+        {
+            if (config == null) return string.Empty;
+            return string.Join(";",
+                (config.Readers ?? new List<MeasurementReaderConfig>())
+                    .Where(reader => reader != null)
+                    .OrderBy(reader => reader.SerialNumber, StringComparer.OrdinalIgnoreCase)
+                    .Select(reader =>
+                        (reader.SerialNumber ?? string.Empty).Trim().ToUpperInvariant()
+                        + "|P" + reader.PowerDbm
+                        + "|I" + reader.ReadIntervalMs
+                        + "|A" + string.Join(",", (reader.Antennas ?? new List<int>()).OrderBy(number => number))));
         }
 
         public void ClearMeasurement(string reason)
         {
-            lock (_gate) ClearMeasurementLocked(reason);
+            bool cleared;
+            lock (_gate) cleared = ClearMeasurementLocked(reason);
+            if (cleared && !_disposed)
+                ApplyRuntimeConfiguration(_store.GetDeviceConfigs());
         }
 
         public IList<ReaderStatus> GetStatuses()
@@ -199,6 +263,8 @@ namespace NSPGatekeeper.Controller.Services
                             Online = false,
                             Message = ex.Message,
                             ConfigRevision = config.ConfigRevision,
+                            PowerDbm = config.PowerDbm,
+                            ReadIntervalMs = config.ReadIntervalMs,
                             Antennas = config.AntennaNumbers(),
                             UpdatedAtUtc = DateTime.UtcNow
                         });
@@ -233,14 +299,19 @@ namespace NSPGatekeeper.Controller.Services
             {
                 if (measurementReader)
                 {
-                    // A Reader assigned to Measurement is isolated from Parking. Only selected
-                    // Measurement antennas are emitted; other antennas on that Reader are ignored.
+                    // Measurement scope changes only Reader runtime settings. The Controller
+                    // reports every TID seen on the selected Reader/Antenna; Edge owns target
+                    // matching and all Measurement business validation.
                     if (measurementPair)
                     {
+                        var readerConfig = measurement.Reader(detection.DeviceSerial);
                         _outbox.EnqueueMeasurement(new MeasurementEvent
                         {
                             EventUid = BuildEventUid("MEAS"),
                             MeasurementCode = measurement.MeasurementCode,
+                            Revision = measurement.Revision,
+                            PowerDbm = readerConfig == null ? 0 : readerConfig.PowerDbm,
+                            ReadIntervalMs = readerConfig == null ? 200 : readerConfig.ReadIntervalMs,
                             SerialNumber = detection.DeviceSerial,
                             AntennaNo = detection.AntennaId,
                             Tid = detection.Tid,
@@ -275,6 +346,8 @@ namespace NSPGatekeeper.Controller.Services
                 {
                     status.DeviceCode = serial;
                     status.SerialNumber = serial;
+                    status.PowerDbm = handle.Config.PowerDbm;
+                    status.ReadIntervalMs = handle.Config.ReadIntervalMs;
                     status.Antennas = handle.Config.AntennaNumbers();
                 }
             }
@@ -288,6 +361,76 @@ namespace NSPGatekeeper.Controller.Services
         {
             var controller = string.IsNullOrWhiteSpace(_settings.ControllerCode) ? "CTRL" : _settings.ControllerCode.Trim().ToUpperInvariant();
             return controller + "-" + prefix + "-" + Guid.NewGuid().ToString("N");
+        }
+
+        private IList<ReaderDeviceConfig> BuildEffectiveConfigs(IList<ReaderDeviceConfig> baseConfigs, MeasurementSessionConfig measurement)
+        {
+            baseConfigs = baseConfigs ?? new List<ReaderDeviceConfig>();
+            if (measurement == null || !measurement.IsRunningDesired) return baseConfigs;
+
+            var selectedReaders = (measurement.Readers ?? new List<MeasurementReaderConfig>())
+                .Where(reader => reader != null && !string.IsNullOrWhiteSpace(reader.SerialNumber))
+                .ToDictionary(
+                    reader => reader.SerialNumber.Trim().ToUpperInvariant(),
+                    reader => reader,
+                    StringComparer.OrdinalIgnoreCase);
+
+            return baseConfigs.Select(config =>
+            {
+                if (config == null) return config;
+                var serial = (config.SerialNumber ?? string.Empty).Trim().ToUpperInvariant();
+                MeasurementReaderConfig measurementReader;
+                if (!selectedReaders.TryGetValue(serial, out measurementReader)) return config;
+
+                var selectedAntennas = new HashSet<int>(
+                    measurementReader.Antennas ?? new List<int>());
+                var clone = CloneReaderConfig(config);
+                clone.PowerDbm = Math.Max(0, Math.Min(40, measurementReader.PowerDbm));
+                clone.ReadIntervalMs = Math.Max(1, Math.Min(60000, measurementReader.ReadIntervalMs));
+                foreach (var antenna in clone.Antennas ?? new List<ReaderAntennaConfig>())
+                    antenna.Enabled = selectedAntennas.Contains(antenna.AntennaId);
+                clone.ConfigHash = (config.ConfigHash ?? string.Empty)
+                                   + "|MEAS|" + measurement.MeasurementCode
+                                   + "|R" + measurement.Revision
+                                   + "|P" + clone.PowerDbm
+                                   + "|I" + clone.ReadIntervalMs
+                                   + "|A" + string.Join(",", clone.AntennaNumbers());
+                return clone;
+            }).Where(x => x != null).ToList();
+        }
+
+        private static ReaderDeviceConfig CloneReaderConfig(ReaderDeviceConfig source)
+        {
+            var clone = new ReaderDeviceConfig
+            {
+                DeviceCode = source.DeviceCode,
+                DriverKey = source.DriverKey,
+                DeviceName = source.DeviceName,
+                SerialNumber = source.SerialNumber,
+                Model = source.Model,
+                Endpoint = source.Endpoint,
+                Port = source.Port,
+                Enabled = source.Enabled,
+                ConfigRevision = source.ConfigRevision,
+                ConfigHash = source.ConfigHash,
+                PowerDbm = source.PowerDbm,
+                ReadIntervalMs = source.ReadIntervalMs,
+                TidStartAddress = source.TidStartAddress,
+                TidLength = source.TidLength,
+                Antennas = (source.Antennas ?? new List<ReaderAntennaConfig>())
+                    .Where(x => x != null)
+                    .Select(x => new ReaderAntennaConfig
+                    {
+                        AntennaId = x.AntennaId,
+                        Enabled = x.Enabled
+                    }).ToList(),
+                Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            };
+            if (source.Options != null)
+            {
+                foreach (var pair in source.Options) clone.Options[pair.Key] = pair.Value;
+            }
+            return clone;
         }
 
         private static string PairKey(string serial, int antennaNo)
@@ -305,14 +448,15 @@ namespace NSPGatekeeper.Controller.Services
             return false;
         }
 
-        private void ClearMeasurementLocked(string reason)
+        private bool ClearMeasurementLocked(string reason)
         {
-            if (_measurement == null) return;
+            if (_measurement == null) return false;
             var code = _measurement.MeasurementCode;
             _measurement = null;
             _measurementReaders.Clear();
             _measurementPairs.Clear();
             if (_logger != null) _logger.Info("measurement", "Measurement mode cleared; Parking mode restored", "code=" + code + "; reason=" + (reason ?? "stopped"));
+            return true;
         }
 
         private void StopRuntime(string serial)

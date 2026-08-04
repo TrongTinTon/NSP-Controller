@@ -1,20 +1,21 @@
-# Adding another RFID reader
+# Adding a Reader driver
 
-1. Create a folder under `Readers/<VendorOrModel>/`.
-2. Implement `IReaderDriverFactory` with a unique `DriverKey`.
-3. Return one isolated `IReaderRuntime` per physical reader.
-4. The runtime emits only:
-   - `RfidDetection` for physical RFID reads.
-   - `ReaderStatus` for technical connection state.
-5. Register the factory once in `Bootstrap/Program.cs`.
+Implement:
 
-A driver must not call Core API, perform parking decisions, resolve users/vehicles, validate borrowing, or write Parking Transactions.
-
-Example:
-
-```csharp
-registry.Register(new Cfe718ReaderFactory(logger));
-registry.Register(new OtherReaderFactory(logger));
+```text
+IReaderDriverFactory
+IReaderRuntime
 ```
 
-Current Edge Reader config identifies Readers by `serial_number` and does not expose a driver key or physical endpoint. Therefore Controller preserves the local physical profile (driver/endpoint/port) by Serial Number. A later Edge payload may provide an optional `connection` object without changing the common pipeline.
+A runtime must:
+
+- use `ReaderDeviceConfig.SerialNumber` as the Reader identity;
+- apply only configured `Ports`;
+- emit `RfidDetection` with `SerialNumber`, `PortNo`, `Tid`, timestamp and optional RSSI;
+- emit `ReaderStatus` whenever connection state changes;
+- isolate failures inside its own worker/thread;
+- stop and dispose without blocking other Reader runtimes.
+
+Register the factory in `Bootstrap/Program.cs`.
+
+Physical connection settings belong to Controller local configuration. Cloud/Edge runtime payloads must not contain vendor endpoint credentials or driver-specific options.

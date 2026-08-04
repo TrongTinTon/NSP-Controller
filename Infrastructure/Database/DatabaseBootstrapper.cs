@@ -4,10 +4,6 @@ using NSPGatekeeper.Controller.Infrastructure.Logging;
 
 namespace NSPGatekeeper.Controller.Infrastructure.Database
 {
-    /// <summary>
-    /// Creates the local PostgreSQL application role/database on first start.
-    /// Runtime schema creation is intentionally kept in LocalStore.EnsureSchema().
-    /// </summary>
     public sealed class DatabaseBootstrapper
     {
         private readonly string _applicationConnectionString;
@@ -74,9 +70,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
         {
             var text = (value ?? string.Empty).Trim();
 
-            // Treat common literal representations of an empty optional setting as empty.
-            // This makes App.config values such as value="" and manually entered ""/''
-            // behave consistently instead of being passed to Npgsql as invalid syntax.
             if (text.Length == 0 || text == "\"\"" || text == "''")
             {
                 if (required)
@@ -84,8 +77,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
                 return string.Empty;
             }
 
-            // Allow an entire connection string to be wrapped in one matching quote pair.
-            // Example: "Host=127.0.0.1;Port=5432;..."
             if (text.Length >= 2 &&
                 ((text[0] == '\"' && text[text.Length - 1] == '\"') ||
                  (text[0] == '\'' && text[text.Length - 1] == '\'')))
@@ -137,10 +128,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
                 }
                 catch (Exception ex)
                 {
-                    // The admin connection is optional. A malformed optional value must not
-                    // prevent startup before we have tried the application credentials against
-                    // the PostgreSQL maintenance database. This also makes upgrades tolerant of
-                    // stale/incorrect values in an existing .exe.config file.
                     LogWarn(
                         "PostgreSqlAdminConnectionString is invalid and will be ignored",
                         "error=" + SafeError(ex));
@@ -150,11 +137,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
 
             if (admin == null)
             {
-                // Limited fallback: use the already-validated application connection settings
-                // and change only the target database to PostgreSQL's maintenance database.
-                // This succeeds when the configured role already exists and has enough
-                // privileges. If it cannot bootstrap a fresh role/database, EnsureDatabase()
-                // will return a precise privilege/credential error.
                 admin = new NpgsqlConnectionStringBuilder(_applicationConnectionString);
                 LogInfo(
                     "Using application PostgreSQL credentials for bootstrap fallback",
@@ -193,7 +175,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
             }
             catch (PostgresException ex) when (ex.SqlState == "42710")
             {
-                // Another Controller process may have completed bootstrap first.
                 LogInfo("PostgreSQL application role was created concurrently", "role=" + roleName);
             }
         }
@@ -221,7 +202,6 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
             }
             catch (PostgresException ex) when (ex.SqlState == "42P04")
             {
-                // Another Controller process may have completed bootstrap first.
                 LogInfo("PostgreSQL database was created concurrently", "database=" + databaseName);
             }
         }

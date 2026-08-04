@@ -25,6 +25,8 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
         private readonly ZeroconfDiscoveryClient _discovery;
         private readonly HttpClient _http;
         private readonly object _authGate = new object();
+        private readonly object _rateGate = new object();
+        private DateTime? _serverRateLimitedUntilUtc;
         private string _accessToken;
         private string _refreshToken;
         private DateTime? _expiresAtUtc;
@@ -40,19 +42,11 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
 
         public string BaseUrl { get { return AppSettings.NormalizeBaseUrl(_settings.CoreApiBaseUrl); } }
 
-        public bool IsAuthenticated
-        {
-            get
-            {
-                lock (_authGate) return IsTokenUsable();
-            }
-        }
-
-        public CoreApiAuthResult EnsureAuthenticated()
+        public void EnsureAuthenticated()
         {
             lock (_authGate)
             {
-                if (IsTokenUsable()) return CurrentAuthResult("token_cached");
+                if (IsTokenUsable()) return;
                 ValidateIdentitySettings();
 
                 if (!string.IsNullOrWhiteSpace(_refreshToken) &&
@@ -61,7 +55,8 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     try
                     {
-                        return RefreshCurrentServer();
+                        RefreshCurrentServer();
+                        return;
                     }
                     catch (Exception refreshError)
                     {
@@ -70,9 +65,11 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                         _refreshExpiresAtUtc = null;
 
                         if (IsConnectivityFailure(refreshError))
-                            return AuthenticateWithDiscoveryFallback(refreshError);
-                        if (!IsAuthorizationFailure(refreshError))
-                            throw;
+                        {
+                            AuthenticateWithDiscoveryFallback(refreshError);
+                            return;
+                        }
+                        if (!IsAuthorizationFailure(refreshError)) throw;
                     }
                 }
 
@@ -80,20 +77,22 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     try
                     {
-                        return AuthenticateAt(BaseUrl, false);
+                        AuthenticateAt(BaseUrl, false);
+                        return;
                     }
                     catch (Exception firstError)
                     {
                         if (!IsConnectivityFailure(firstError)) throw;
                         if (!_settings.DiscoveryEnabled) throw BuildConnectionException(BaseUrl, firstError, null);
-                        return AuthenticateWithDiscoveryFallback(firstError);
+                        AuthenticateWithDiscoveryFallback(firstError);
+                        return;
                     }
                 }
 
                 if (!_settings.DiscoveryEnabled)
                     throw new InvalidOperationException("Core API Server URL is empty and Zeroconf fallback is disabled.");
 
-                return AuthenticateWithDiscoveryFallback(new InvalidOperationException("No saved Core API Server URL."));
+                AuthenticateWithDiscoveryFallback(new InvalidOperationException("No saved Core API Server URL."));
             }
         }
 
@@ -102,6 +101,24 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             var http = error as CoreApiHttpException;
             return http != null && http.StatusCode >= 400 && http.StatusCode < 500 &&
                    http.StatusCode != 401 && http.StatusCode != 408 && http.StatusCode != 429;
+        }
+
+        public bool IsRateLimitError(Exception error)
+        {
+            var http = error as CoreApiHttpException;
+            return error is CoreApiClientThrottleException || (http != null && http.StatusCode == 429);
+        }
+
+        public TimeSpan? GetRateLimitRetryDelay(Exception error)
+        {
+            var local = error as CoreApiClientThrottleException;
+            if (local != null) return NormalizeRetryDelay(local.RetryAfter);
+
+            var http = error as CoreApiHttpException;
+            if (http != null && http.StatusCode == 429)
+                return NormalizeRetryDelay(http.RetryAfter ?? TimeSpan.FromSeconds(_settings.CoreApiRateLimitBackoffSec));
+
+            return null;
         }
 
         public void InvalidateToken()
@@ -113,6 +130,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 _expiresAtUtc = null;
                 _refreshExpiresAtUtc = null;
             }
+            ResetRateState();
         }
 
         public JObject Heartbeat()
@@ -120,7 +138,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return PostAuthenticated("heartbeat", new JObject { ["controller_code"] = _settings.ControllerCode });
         }
 
-        public IList<ReaderDeviceConfig> PullDeviceConfigs()
+        public IList<ReaderDeviceConfig> PullReaderConfigs()
         {
             var response = PostAuthenticated("controller/device-config/pull", new JObject
             {
@@ -132,6 +150,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             if (devices == null) return new List<ReaderDeviceConfig>();
 
             var result = new List<ReaderDeviceConfig>();
+            var seenSerials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var token in devices.OfType<JObject>())
             {
                 var serial = Clean((string)token["serial_number"]);
@@ -141,56 +160,38 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     continue;
                 }
                 serial = serial.ToUpperInvariant();
+                if (!seenSerials.Add(serial))
+                    throw new InvalidOperationException("Controller configuration contains duplicate Reader serial_number: " + serial);
 
                 var readerParameters = token["reader_parameters"] as JObject ?? new JObject();
-                var connection = token["connection"] as JObject ?? new JObject();
                 var config = new ReaderDeviceConfig
                 {
-                    DeviceCode = serial,
                     SerialNumber = serial,
-                    DeviceName = Clean((string)token["reader_name"]) ?? serial,
-                    Model = Clean((string)token["model_number"]),
-                    DriverKey = Clean((string)connection["driver_key"] ?? (string)token["driver_key"]),
-                    Endpoint = Clean((string)connection["endpoint"] ?? (string)token["endpoint"]),
-                    Port = connection.Value<int?>("port") ?? token.Value<int?>("port") ?? 0,
                     Enabled = true,
-                    PowerDbm = readerParameters.Value<int?>("power_dbm") ?? 30,
-                    ReadIntervalMs = readerParameters.Value<int?>("read_interval_ms") ?? 200,
-                    TidStartAddress = readerParameters.Value<int?>("tid_start_address") ?? 2,
-                    TidLength = readerParameters.Value<int?>("tid_length") ?? 4,
+                    PowerDbm = Clamp(readerParameters.Value<int?>("power_dbm") ?? 30, 0, 40),
+                    ReadIntervalMs = Clamp(readerParameters.Value<int?>("read_interval_ms") ?? 200, 1, 60000),
+                    TidStartAddress = Math.Max(0, readerParameters.Value<int?>("tid_start_address") ?? 2),
+                    TidLength = Math.Max(1, readerParameters.Value<int?>("tid_length") ?? 4),
                     ConfigHash = Sha256(token.ToString(Formatting.None))
                 };
 
-                var options = connection["options"] as JObject ?? token["options"] as JObject;
-                if (options != null)
+                var ports = token["ports"] as JArray;
+                if (ports != null)
                 {
-                    foreach (var property in options.Properties())
-                        config.Options[property.Name] = property.Value == null ? string.Empty : property.Value.ToString();
-                }
-
-                var antennas = token["antennas"] as JArray;
-                if (antennas != null)
-                {
-                    foreach (var ant in antennas.OfType<JObject>())
+                    foreach (var item in ports.OfType<JObject>())
                     {
-                        var antennaNo = ant.Value<int?>("antenna_no") ?? 0;
-                        if (antennaNo <= 0) continue;
-                        config.Antennas.Add(new ReaderAntennaConfig
-                        {
-                            AntennaId = antennaNo,
-                            Enabled = true
-                        });
+                        var portNo = item.Value<int?>("port_no") ?? 0;
+                        if (portNo < 1 || portNo > 16 || config.Ports.Contains(portNo)) continue;
+                        config.Ports.Add(portNo);
                     }
                 }
 
-                // Current Edge payload is deliberately server-minimal. Physical connection
-                // properties may be supplied later or preserved from the local cached profile.
                 result.Add(config);
             }
             return result;
         }
 
-        public void ReportDeviceStatus(IList<ReaderStatus> statuses)
+        public void ReportReaderStatus(IList<ReaderStatus> statuses)
         {
             var devices = new JArray();
             foreach (var status in statuses ?? new List<ReaderStatus>())
@@ -200,11 +201,8 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 devices.Add(new JObject
                 {
                     ["serial_number"] = status.SerialNumber.Trim().ToUpperInvariant(),
-                    ["antennas"] = new JArray((status.Antennas ?? new List<int>()).Distinct().OrderBy(x => x)),
+                    ["ports"] = new JArray((status.Ports ?? new List<int>()).Where(value => value >= 1 && value <= 16).Distinct().OrderBy(value => value)),
                     ["device_status"] = DeviceStatusName(status),
-                    // An online status report is itself proof that the Reader is alive now.
-                    // Do not reuse the timestamp from the original connect transition, or
-                    // Edge's offline cron would eventually mark a healthy Reader offline.
                     ["last_seen_at"] = reportedSeenAt.ToUniversalTime().ToString("o"),
                     ["firmware_version"] = status.FirmwareVersion ?? string.Empty,
                     ["power_dbm"] = Math.Max(0, Math.Min(40, status.PowerDbm)),
@@ -212,11 +210,12 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 });
             }
 
-            PostAuthenticated("devices/report", new JObject
+            var response = PostAuthenticated("devices/report", new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
                 ["devices"] = devices
             });
+            LogBatchFailures("reader-status", response);
         }
 
         public void PushDetections(IList<RfidDetection> detections)
@@ -228,8 +227,8 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 items.Add(new JObject
                 {
                     ["event_uid"] = detection.EventUid,
-                    ["serial_number"] = detection.DeviceSerial,
-                    ["antenna_no"] = detection.AntennaId,
+                    ["serial_number"] = detection.SerialNumber,
+                    ["port_no"] = detection.PortNo,
                     ["detected_at"] = detection.DetectedAtUtc.ToUniversalTime().ToString("o"),
                     ["tid"] = detection.Tid
                 });
@@ -242,33 +241,29 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             });
         }
 
-        public MeasurementSessionConfig PullMeasurement(string currentMeasurementCode)
+        public LaneCalibrationSessionConfig PullLaneCalibration(string currentLaneCalibrationCode)
         {
             var response = PostAuthenticated("controller/measurement/pull", new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["current_measurement_code"] = currentMeasurementCode ?? string.Empty
+                ["current_measurement_code"] = currentLaneCalibrationCode ?? string.Empty
             });
 
             var envelopeData = response["data"] as JObject;
             var payload = envelopeData == null ? null : envelopeData["data"] as JObject;
             if (payload == null) payload = envelopeData;
-            if (payload == null) return new MeasurementSessionConfig { Available = false };
+            if (payload == null) return new LaneCalibrationSessionConfig { Available = false };
 
             var available = payload.Value<bool?>("measurement_available") ?? false;
-            if (!available) return new MeasurementSessionConfig { Available = false };
+            if (!available) return new LaneCalibrationSessionConfig { Available = false };
 
-            var config = new MeasurementSessionConfig
+            var config = new LaneCalibrationSessionConfig
             {
                 Available = true,
-                MeasurementCode = Clean((string)payload["measurement_code"]),
-                ControllerCode = Clean((string)payload["controller_code"]),
+                LaneCalibrationCode = Clean((string)payload["measurement_code"]),
                 Status = Clean((string)payload["status"]),
                 DesiredState = Clean((string)payload["desired_state"]),
-                Revision = payload.Value<int?>("revision") ?? 1,
-                PlannedStartAtUtc = ParseUtc((string)payload["planned_start_at"]),
-                PlannedEndAtUtc = ParseUtc((string)payload["planned_end_at"]),
-                Note = Clean((string)payload["note"])
+                Revision = payload.Value<int?>("revision") ?? 1
             };
 
             var readers = payload["readers"] as JArray;
@@ -276,26 +271,26 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             {
                 foreach (var reader in readers.OfType<JObject>())
                 {
-                    var serial = Clean((string)reader["serial_number"]).ToUpperInvariant();
+                    var serial = NormalizeSerial((string)reader["serial_number"]);
                     if (string.IsNullOrWhiteSpace(serial)) continue;
-                    var readerConfig = new MeasurementReaderConfig
+                    var readerConfig = new LaneCalibrationReaderConfig
                     {
                         SerialNumber = serial,
                         PowerDbm = Math.Max(0, Math.Min(40, reader.Value<int?>("power_dbm") ?? 30)),
                         ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.Value<int?>("read_interval_ms") ?? 200))
                     };
-                    var antennaNumbers = reader["antennas"] as JArray;
-                    if (antennaNumbers != null)
+                    var portNumbers = reader["ports"] as JArray;
+                    if (portNumbers != null)
                     {
-                        foreach (var number in antennaNumbers)
+                        foreach (var number in portNumbers)
                         {
-                            int antennaNo;
-                            if (!int.TryParse(number.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out antennaNo) || antennaNo <= 0) continue;
-                            if (!readerConfig.Antennas.Contains(antennaNo))
-                                readerConfig.Antennas.Add(antennaNo);
+                            int portNo;
+                            if (!int.TryParse(number.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out portNo) || portNo < 1 || portNo > 16) continue;
+                            if (!readerConfig.Ports.Contains(portNo))
+                                readerConfig.Ports.Add(portNo);
                         }
                     }
-                    if (readerConfig.Antennas.Count > 0
+                    if (readerConfig.Ports.Count > 0
                         && !config.Readers.Any(x => string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase)))
                     {
                         config.Readers.Add(readerConfig);
@@ -305,9 +300,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return config;
         }
 
-        public void PushMeasurementEvents(string measurementCode, IList<MeasurementEvent> events)
+        public IList<BatchItemResult> PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
         {
-            if (events == null || events.Count == 0) return;
+            if (events == null || events.Count == 0) return new List<BatchItemResult>();
             var items = new JArray();
             foreach (var item in events)
             {
@@ -318,7 +313,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     ["power_dbm"] = Math.Max(0, item.PowerDbm),
                     ["read_interval_ms"] = Math.Max(1, Math.Min(60000, item.ReadIntervalMs)),
                     ["serial_number"] = item.SerialNumber,
-                    ["antenna_no"] = item.AntennaNo,
+                    ["port_no"] = item.PortNo,
                     ["tid"] = item.Tid,
                     ["read_at"] = item.ReadAtUtc.ToUniversalTime().ToString("o")
                 };
@@ -326,20 +321,21 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 items.Add(payload);
             }
 
-            PostAuthenticated("controller/measurement/events", new JObject
+            var response = PostAuthenticated("controller/measurement/events", new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["measurement_code"] = measurementCode,
+                ["measurement_code"] = laneCalibrationCode,
                 ["events"] = items
             });
+            return ParseBatchResults(response, events.Count);
         }
 
-        public void ReportMeasurementStatus(string measurementCode, string status, DateTime occurredAtUtc, string message)
+        public void ReportLaneCalibrationStatus(string laneCalibrationCode, string status, DateTime occurredAtUtc, string message)
         {
             var payload = new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["measurement_code"] = measurementCode,
+                ["measurement_code"] = laneCalibrationCode,
                 ["status"] = status,
                 ["occurred_at"] = occurredAtUtc.ToUniversalTime().ToString("o")
             };
@@ -347,7 +343,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             PostAuthenticated("controller/measurement/status", payload);
         }
 
-        private CoreApiAuthResult AuthenticateWithDiscoveryFallback(Exception firstError)
+        private void AuthenticateWithDiscoveryFallback(Exception firstError)
         {
             if (_logger != null)
                 _logger.Warn("core-api", "Configured Core API is unreachable; starting Zeroconf fallback", DescribeException(firstError));
@@ -375,12 +371,11 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     "). Configure the intended Server URL explicitly.");
 
             var candidate = candidates[0];
-            var result = AuthenticateAt(candidate.BaseUrl, true, candidate.AuthPath);
+            AuthenticateAt(candidate.BaseUrl, true, candidate.AuthPath);
             if (_logger != null) _logger.Info("zeroconf", "Discovered Edge authenticated and selected", candidate.BaseUrl);
-            return result;
         }
 
-        private CoreApiAuthResult AuthenticateAt(string baseUrl, bool saveOnSuccess, string authPath = "/auth/token")
+        private void AuthenticateAt(string baseUrl, bool saveOnSuccess, string authPath = "/auth/token")
         {
             ValidateIdentitySettings();
             baseUrl = AppSettings.NormalizeBaseUrl(baseUrl);
@@ -395,10 +390,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             if (saveOnSuccess || !string.Equals(BaseUrl, baseUrl, StringComparison.OrdinalIgnoreCase))
                 _settings.SaveDiscoveredBaseUrl(baseUrl);
             if (_logger != null) _logger.Info("auth", "Core API authenticated", "server=" + baseUrl);
-            return CurrentAuthResult("authenticated");
         }
 
-        private CoreApiAuthResult RefreshCurrentServer()
+        private void RefreshCurrentServer()
         {
             var response = PostRaw(BaseUrl, "/auth/refresh", new JObject
             {
@@ -406,7 +400,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             }, null);
             ApplyAuthResponse(response);
             if (_logger != null) _logger.Info("auth", "Core API token refreshed");
-            return CurrentAuthResult("refreshed");
         }
 
         private void ApplyAuthResponse(JObject response)
@@ -425,14 +418,16 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             _refreshToken = refreshToken;
             _expiresAtUtc = DateTime.UtcNow.AddSeconds(Math.Max(60, expiresIn));
             _refreshExpiresAtUtc = refreshExpiresIn > 0 ? (DateTime?)DateTime.UtcNow.AddSeconds(refreshExpiresIn) : null;
+            ResetRateState();
         }
 
         private JObject PostAuthenticated(string suffix, JObject payload)
         {
             EnsureAuthenticated();
+            var path = "/v1/" + (suffix ?? string.Empty).Trim('/');
             try
             {
-                return PostRaw(BaseUrl, "/v1/" + (suffix ?? string.Empty).Trim('/'), payload, _accessToken);
+                return SendAuthenticatedRequest(path, payload);
             }
             catch (CoreApiHttpException ex)
             {
@@ -443,7 +438,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     _expiresAtUtc = null;
                 }
                 EnsureAuthenticated();
-                return PostRaw(BaseUrl, "/v1/" + (suffix ?? string.Empty).Trim('/'), payload, _accessToken);
+                return SendAuthenticatedRequest(path, payload);
             }
             catch (Exception ex)
             {
@@ -454,8 +449,68 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     _expiresAtUtc = null;
                 }
                 EnsureAuthenticated();
-                return PostRaw(BaseUrl, "/v1/" + (suffix ?? string.Empty).Trim('/'), payload, _accessToken);
+                return SendAuthenticatedRequest(path, payload);
             }
+        }
+
+        private JObject SendAuthenticatedRequest(string path, JObject payload)
+        {
+            HonorServerRateLimitCooldown();
+            try
+            {
+                return PostRaw(BaseUrl, path, payload, _accessToken);
+            }
+            catch (CoreApiHttpException ex)
+            {
+                if (ex.StatusCode == 429) RegisterServerRateLimit(ex.RetryAfter);
+                throw;
+            }
+        }
+
+        private void HonorServerRateLimitCooldown()
+        {
+            // Controller does not impose a client-side requests-per-minute quota.
+            // Server policy is authoritative. This method only honors a cooldown
+            // explicitly returned by the server through HTTP 429 / Retry-After.
+            var now = DateTime.UtcNow;
+            lock (_rateGate)
+            {
+                if (!_serverRateLimitedUntilUtc.HasValue) return;
+                if (_serverRateLimitedUntilUtc.Value > now)
+                    throw new CoreApiClientThrottleException(
+                        _serverRateLimitedUntilUtc.Value - now,
+                        "Server rate-limit cooldown is active.");
+                _serverRateLimitedUntilUtc = null;
+            }
+        }
+
+        private void ResetRateState()
+        {
+            lock (_rateGate)
+            {
+                _serverRateLimitedUntilUtc = null;
+            }
+        }
+
+        private void RegisterServerRateLimit(TimeSpan? retryAfter)
+        {
+            var delay = NormalizeRetryDelay(retryAfter ?? TimeSpan.FromSeconds(_settings.CoreApiRateLimitBackoffSec));
+            var until = DateTime.UtcNow.Add(delay);
+            lock (_rateGate)
+            {
+                if (!_serverRateLimitedUntilUtc.HasValue || _serverRateLimitedUntilUtc.Value < until)
+                    _serverRateLimitedUntilUtc = until;
+            }
+            if (_logger != null)
+                _logger.Warn("core-api", "Server rate limit reached; all API workers paused",
+                    "retry_in_sec=" + Math.Ceiling(delay.TotalSeconds).ToString(CultureInfo.InvariantCulture));
+        }
+
+        private static TimeSpan NormalizeRetryDelay(TimeSpan value)
+        {
+            if (value < TimeSpan.FromMilliseconds(250)) return TimeSpan.FromMilliseconds(250);
+            if (value > TimeSpan.FromMinutes(5)) return TimeSpan.FromMinutes(5);
+            return value;
         }
 
         private JObject PostRaw(string baseUrl, string path, JObject payload, string bearerToken)
@@ -466,30 +521,42 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 request.Content = new StringContent((payload ?? new JObject()).ToString(Formatting.None), Encoding.UTF8, "application/json");
                 if (!string.IsNullOrWhiteSpace(bearerToken)) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
 
-                HttpResponseMessage response;
-                string body;
                 try
                 {
-                    response = _http.SendAsync(request).GetAwaiter().GetResult();
-                    body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    using (var response = _http.SendAsync(request).GetAwaiter().GetResult())
+                    {
+                        var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                        JObject json;
+                        try { json = string.IsNullOrWhiteSpace(body) ? new JObject() : JObject.Parse(body); }
+                        catch { json = new JObject { ["raw"] = body ?? string.Empty }; }
+                        if (json["result"] is JObject) json = (JObject)json["result"];
+
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            var message = Clean((string)json["message"] ?? (string)json["error"] ?? response.ReasonPhrase) ?? "request failed";
+                            throw new CoreApiHttpException((int)response.StatusCode, path, message, ParseRetryAfter(response));
+                        }
+                        return json;
+                    }
+                }
+                catch (CoreApiHttpException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
                     throw new HttpRequestException("Cannot connect to " + url + ": " + DescribeException(ex), ex);
                 }
-
-                JObject json;
-                try { json = string.IsNullOrWhiteSpace(body) ? new JObject() : JObject.Parse(body); }
-                catch { json = new JObject { ["raw"] = body ?? string.Empty }; }
-                if (json["result"] is JObject) json = (JObject)json["result"];
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var message = Clean((string)json["message"] ?? (string)json["error"] ?? response.ReasonPhrase) ?? "request failed";
-                    throw new CoreApiHttpException((int)response.StatusCode, path, message);
-                }
-                return json;
             }
+        }
+
+        private static TimeSpan? ParseRetryAfter(HttpResponseMessage response)
+        {
+            if (response == null || response.Headers == null || response.Headers.RetryAfter == null) return null;
+            var value = response.Headers.RetryAfter;
+            if (value.Delta.HasValue) return NormalizeRetryDelay(value.Delta.Value);
+            if (value.Date.HasValue) return NormalizeRetryDelay(value.Date.Value.UtcDateTime - DateTime.UtcNow);
+            return null;
         }
 
         private string BuildUrl(string baseUrl, string path)
@@ -506,17 +573,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
         {
             return !string.IsNullOrWhiteSpace(_accessToken) &&
                    (!_expiresAtUtc.HasValue || _expiresAtUtc.Value > DateTime.UtcNow.AddMinutes(1));
-        }
-
-        private CoreApiAuthResult CurrentAuthResult(string message)
-        {
-            return new CoreApiAuthResult
-            {
-                Success = IsTokenUsable(),
-                AccessToken = _accessToken,
-                ExpiresAtUtc = _expiresAtUtc,
-                Message = message
-            };
         }
 
         private void ValidateIdentitySettings()
@@ -576,13 +632,52 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return "offline";
         }
 
-        private static DateTime? ParseUtc(string value)
+
+        private static IList<BatchItemResult> ParseBatchResults(JObject response, int expectedCount)
         {
-            if (string.IsNullOrWhiteSpace(value)) return null;
-            DateTimeOffset dto;
-            if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out dto))
-                return dto.UtcDateTime;
-            return null;
+            var data = response == null ? null : response["data"] as JObject;
+            var rows = data == null ? null : data["results"] as JArray;
+            var failed = data == null ? 0 : data.Value<int?>("failed") ?? 0;
+            if (rows == null)
+            {
+                if (failed > 0) throw new InvalidOperationException("Core API batch response reports failures without item results.");
+                return Enumerable.Range(0, expectedCount)
+                    .Select(index => new BatchItemResult { Index = index, Status = "processed", Message = "Processed" })
+                    .ToList();
+            }
+
+            var result = new List<BatchItemResult>();
+            var seen = new HashSet<int>();
+            foreach (var row in rows.OfType<JObject>())
+            {
+                var index = row.Value<int?>("index") ?? -1;
+                var status = Clean((string)row["status"]);
+                if (index < 0 || index >= expectedCount || !seen.Add(index) || string.IsNullOrWhiteSpace(status))
+                    throw new InvalidOperationException("Core API batch response contains an invalid item result.");
+                var item = new BatchItemResult
+                {
+                    Index = index,
+                    Status = status.ToLowerInvariant(),
+                    Message = Clean((string)row["message"] ?? (string)row["error_code"])
+                };
+                if (!item.Delivered && !item.Rejected)
+                    throw new InvalidOperationException("Core API batch response contains an unsupported status: " + item.Status);
+                result.Add(item);
+            }
+
+            if (result.Count != expectedCount)
+                throw new InvalidOperationException("Core API batch response does not contain one result per submitted item.");
+            return result.OrderBy(item => item.Index).ToList();
+        }
+
+        private void LogBatchFailures(string category, JObject response)
+        {
+            if (_logger == null || response == null) return;
+            var data = response["data"] as JObject;
+            var failed = data == null ? 0 : data.Value<int?>("failed") ?? 0;
+            if (failed > 0)
+                _logger.Warn(category, "Server rejected one or more batch items",
+                    "failed=" + failed.ToString(CultureInfo.InvariantCulture));
         }
 
         private static string Sha256(string text)
@@ -596,6 +691,17 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             }
         }
 
+        private static int Clamp(int value, int min, int max)
+        {
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        private static string NormalizeSerial(string value)
+        {
+            var normalized = Clean(value);
+            return normalized == null ? null : normalized.ToUpperInvariant();
+        }
+
         private static string Clean(string value)
         {
             return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
@@ -606,14 +712,27 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             _http.Dispose();
         }
 
+        private sealed class CoreApiClientThrottleException : InvalidOperationException
+        {
+            public TimeSpan RetryAfter { get; private set; }
+
+            public CoreApiClientThrottleException(TimeSpan retryAfter, string message)
+                : base(message + " Retry after " + Math.Ceiling(retryAfter.TotalSeconds).ToString(CultureInfo.InvariantCulture) + " second(s).")
+            {
+                RetryAfter = retryAfter;
+            }
+        }
+
         private sealed class CoreApiHttpException : InvalidOperationException
         {
             public int StatusCode { get; private set; }
+            public TimeSpan? RetryAfter { get; private set; }
 
-            public CoreApiHttpException(int statusCode, string path, string message)
+            public CoreApiHttpException(int statusCode, string path, string message, TimeSpan? retryAfter)
                 : base("Core API " + path + " failed: HTTP " + statusCode + " - " + message)
             {
                 StatusCode = statusCode;
+                RetryAfter = retryAfter;
             }
         }
     }

@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
+using System.IO.Ports;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -30,11 +32,14 @@ namespace NSPGatekeeper.Controller.UI
         private readonly DataGridView _readerGrid = CreateGrid();
         private readonly TextBox _readerSerial = new TextBox();
         private readonly TextBox _readerDriver = new TextBox();
-        private readonly TextBox _readerEndpoint = new TextBox();
+        private readonly ComboBox _readerEndpoint = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown };
+        private readonly Label _comPortStatus = new Label();
         private readonly NumericUpDown _readerPort = new NumericUpDown();
-        private readonly DataGridView _measurementGrid = CreateGrid();
+        private readonly DataGridView _laneCalibrationGrid = CreateGrid();
         private readonly TextBox _logBox = new TextBox();
         private readonly Timer _refreshTimer = new Timer();
+        private string _comPortSignature = string.Empty;
+        private string _readerRowsSignature = string.Empty;
 
         public MainForm(AppSettings settings, ControllerRuntime runtime, ReaderManager readers, LocalStore store, FileLogger logger)
         {
@@ -57,9 +62,9 @@ namespace NSPGatekeeper.Controller.UI
             _logger.EntryWritten += OnLog;
 
             _refreshTimer.Interval = 2000;
-            _refreshTimer.Tick += delegate { RefreshRuntimeView(); };
+            _refreshTimer.Tick += delegate { RefreshComPorts(false); RefreshRuntimeView(); };
             _refreshTimer.Start();
-            Shown += delegate { RefreshRuntimeView(); };
+            Shown += delegate { RefreshComPorts(true); RefreshRuntimeView(); };
             FormClosed += OnClosed;
         }
 
@@ -68,7 +73,7 @@ namespace NSPGatekeeper.Controller.UI
             var tabs = new TabControl { Dock = DockStyle.Fill };
             tabs.TabPages.Add(BuildControllerTab());
             tabs.TabPages.Add(BuildReadersTab());
-            tabs.TabPages.Add(BuildMeasurementTab());
+            tabs.TabPages.Add(BuildLaneCalibrationTab());
             tabs.TabPages.Add(BuildLogsTab());
             Controls.Add(tabs);
         }
@@ -104,7 +109,7 @@ namespace NSPGatekeeper.Controller.UI
             var sync = new Button { Text = "Sync Reader Config", AutoSize = true };
             save.Click += delegate { SaveSettings(); };
             test.Click += async delegate { await RunUiAction(test, _runtime.TestConnectionOnce); };
-            sync.Click += async delegate { await RunUiAction(sync, _runtime.PullDeviceConfigOnce); };
+            sync.Click += async delegate { await RunUiAction(sync, _runtime.PullReaderConfigOnce); };
             buttons.Controls.Add(save);
             buttons.Controls.Add(test);
             buttons.Controls.Add(sync);
@@ -146,7 +151,7 @@ namespace NSPGatekeeper.Controller.UI
                 AutoSize = true,
                 Padding = new Padding(10),
                 ColumnCount = 6,
-                RowCount = 3
+                RowCount = 4
             };
             local.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             local.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
@@ -165,18 +170,28 @@ namespace NSPGatekeeper.Controller.UI
             AddInlineField(local, 0, 1, "Endpoint", _readerEndpoint);
             local.SetColumnSpan(_readerEndpoint, 3);
 
+            var localButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
+            var refreshCom = new Button { Text = "Refresh COM", AutoSize = true };
             var saveLocal = new Button { Text = "Save Local Connection", AutoSize = true };
+            refreshCom.Click += delegate { RefreshComPorts(true); };
             saveLocal.Click += delegate { SaveSelectedReaderConnection(); };
-            local.Controls.Add(saveLocal, 4, 1);
-            local.SetColumnSpan(saveLocal, 2);
+            localButtons.Controls.Add(refreshCom);
+            localButtons.Controls.Add(saveLocal);
+            local.Controls.Add(localButtons, 4, 1);
+            local.SetColumnSpan(localButtons, 2);
+
+            _comPortStatus.AutoSize = true;
+            _comPortStatus.ForeColor = Color.DimGray;
+            local.Controls.Add(_comPortStatus, 0, 2);
+            local.SetColumnSpan(_comPortStatus, 6);
 
             var note = new Label
             {
-                Text = "Physical connection is Controller-local when Edge does not provide endpoint/driver. Empty CF-E718 endpoint uses SDK Auto COM discovery.",
+                Text = "Readers are created by Edge configuration. Windows COM ports are shown in Endpoint for local binding. Empty CF-E718 endpoint uses SDK Auto COM discovery.",
                 AutoSize = true,
                 ForeColor = Color.DimGray
             };
-            local.Controls.Add(note, 0, 2);
+            local.Controls.Add(note, 0, 3);
             local.SetColumnSpan(note, 6);
 
             tab.Controls.Add(_readerGrid);
@@ -184,12 +199,12 @@ namespace NSPGatekeeper.Controller.UI
             return tab;
         }
 
-        private TabPage BuildMeasurementTab()
+        private TabPage BuildLaneCalibrationTab()
         {
-            var tab = new TabPage("Live RFID / Measurement");
-            _measurementGrid.Dock = DockStyle.Fill;
-            _measurementGrid.AutoGenerateColumns = true;
-            tab.Controls.Add(_measurementGrid);
+            var tab = new TabPage("Live RFID / Lane Calibration");
+            _laneCalibrationGrid.Dock = DockStyle.Fill;
+            _laneCalibrationGrid.AutoGenerateColumns = true;
+            tab.Controls.Add(_laneCalibrationGrid);
             return tab;
         }
 
@@ -234,11 +249,13 @@ namespace NSPGatekeeper.Controller.UI
                 if (_readerGrid.CurrentRow == null) return;
                 var status = _readerGrid.CurrentRow.DataBoundItem as ReaderStatus;
                 if (status == null || string.IsNullOrWhiteSpace(status.SerialNumber)) return;
-                var config = _store.GetDeviceConfigs().FirstOrDefault(x => string.Equals(x.SerialNumber, status.SerialNumber, StringComparison.OrdinalIgnoreCase));
+                var config = _store.GetReaderConfigs().FirstOrDefault(x => string.Equals(x.SerialNumber, status.SerialNumber, StringComparison.OrdinalIgnoreCase));
                 if (config == null) return;
                 _readerSerial.Text = config.SerialNumber ?? string.Empty;
                 _readerDriver.Text = config.DriverKey ?? string.Empty;
-                _readerEndpoint.Text = config.Endpoint ?? string.Empty;
+                _readerEndpoint.Text = !string.IsNullOrWhiteSpace(config.Endpoint)
+                    ? config.Endpoint
+                    : NormalizeDetectedEndpoint(status.Endpoint);
                 _readerPort.Value = Math.Max(_readerPort.Minimum, Math.Min(_readerPort.Maximum, config.Port));
             }
             catch { }
@@ -315,25 +332,148 @@ namespace NSPGatekeeper.Controller.UI
         {
             if (InvokeRequired) { BeginInvoke(new Action(RefreshRuntimeView)); return; }
             _connectionStatus.Text = (_runtime.Running ? "Running" : "Stopped") + " | " + _runtime.ConnectionMessage;
-            _modeStatus.Text = _runtime.Mode + (string.IsNullOrWhiteSpace(_runtime.MeasurementCode) ? string.Empty : " | " + _runtime.MeasurementCode);
+            _modeStatus.Text = _runtime.Mode + (string.IsNullOrWhiteSpace(_runtime.LaneCalibrationCode) ? string.Empty : " | " + _runtime.LaneCalibrationCode);
             try
             {
-                _readerGrid.DataSource = new BindingList<ReaderStatus>(_store.GetReaderStatuses().ToList());
+                RefreshReaderGrid();
             }
-            catch { }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Warn("reader-ui", "Could not refresh Reader list", ex.Message);
+            }
 
             var detections = _readers.GetRecentDetections()
                 .OrderByDescending(x => x.DetectedAtUtc)
                 .Select(x => new
                 {
                     Time = x.DetectedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff"),
-                    Reader = x.DeviceSerial,
-                    Antenna = x.AntennaId,
+                    Reader = x.SerialNumber,
+                    Port = x.PortNo,
                     TID = x.Tid,
-                    RSSI = x.RssiDbm,
-                    Sequence = x.SequenceNo
+                    RSSI = x.RssiDbm
                 }).ToList();
-            _measurementGrid.DataSource = detections;
+            _laneCalibrationGrid.DataSource = detections;
+        }
+
+
+        private void RefreshComPorts(bool force)
+        {
+            try
+            {
+                var ports = SerialPort.GetPortNames()
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Select(value => value.Trim().ToUpperInvariant())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(ComPortNumber)
+                    .ThenBy(value => value, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var signature = string.Join("|", ports);
+                if (!force && string.Equals(signature, _comPortSignature, StringComparison.Ordinal)) return;
+
+                var current = _readerEndpoint.Text;
+                _readerEndpoint.BeginUpdate();
+                try
+                {
+                    _readerEndpoint.Items.Clear();
+                    foreach (var port in ports) _readerEndpoint.Items.Add(port);
+                }
+                finally
+                {
+                    _readerEndpoint.EndUpdate();
+                }
+                _readerEndpoint.Text = current;
+                _comPortSignature = signature;
+                _comPortStatus.Text = ports.Count == 0
+                    ? "Windows COM ports: none detected"
+                    : "Windows COM ports: " + string.Join(", ", ports);
+                _comPortStatus.ForeColor = ports.Count == 0 ? Color.Firebrick : Color.DimGray;
+            }
+            catch (Exception ex)
+            {
+                _comPortStatus.Text = "Windows COM ports: detection failed";
+                _comPortStatus.ForeColor = Color.Firebrick;
+                if (_logger != null) _logger.Warn("reader-ui", "Could not enumerate Windows COM ports", ex.Message);
+            }
+        }
+
+        private void RefreshReaderGrid()
+        {
+            var configs = _store.GetReaderConfigs()
+                .Where(value => value != null && !string.IsNullOrWhiteSpace(value.SerialNumber))
+                .OrderBy(value => value.SerialNumber, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var statuses = _store.GetReaderStatuses()
+                .Where(value => value != null && !string.IsNullOrWhiteSpace(value.SerialNumber))
+                .ToDictionary(value => value.SerialNumber.Trim().ToUpperInvariant(), StringComparer.OrdinalIgnoreCase);
+
+            var rows = new List<ReaderStatus>();
+            foreach (var config in configs)
+            {
+                var serial = config.SerialNumber.Trim().ToUpperInvariant();
+                ReaderStatus status;
+                if (!statuses.TryGetValue(serial, out status))
+                {
+                    status = new ReaderStatus
+                    {
+                        DriverKey = config.DriverKey,
+                        SerialNumber = serial,
+                        Model = config.DriverKey,
+                        Endpoint = string.IsNullOrWhiteSpace(config.Endpoint) ? "AUTO-COM" : config.Endpoint,
+                        Online = false,
+                        Message = config.Enabled ? "waiting_for_runtime_status" : "disabled_or_no_ports",
+                        PowerDbm = config.PowerDbm,
+                        ReadIntervalMs = config.ReadIntervalMs,
+                        Ports = config.PortNumbers(),
+                        UpdatedAtUtc = DateTime.MinValue
+                    };
+                }
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(status.Endpoint))
+                        status.Endpoint = string.IsNullOrWhiteSpace(config.Endpoint) ? "AUTO-COM" : config.Endpoint;
+                }
+                rows.Add(status);
+            }
+
+            var selectedSerial = _readerGrid.CurrentRow == null
+                ? string.Empty
+                : ((_readerGrid.CurrentRow.DataBoundItem as ReaderStatus)?.SerialNumber ?? string.Empty);
+            var signature = string.Join("|", rows.Select(value =>
+                (value.SerialNumber ?? string.Empty) + ";"
+                + (value.Endpoint ?? string.Empty) + ";"
+                + value.Online + ";"
+                + (value.Message ?? string.Empty) + ";"
+                + value.UpdatedAtUtc.Ticks));
+            if (string.Equals(signature, _readerRowsSignature, StringComparison.Ordinal)) return;
+
+            _readerGrid.DataSource = new BindingList<ReaderStatus>(rows);
+            _readerRowsSignature = signature;
+            if (!string.IsNullOrWhiteSpace(selectedSerial))
+            {
+                foreach (DataGridViewRow row in _readerGrid.Rows)
+                {
+                    var value = row.DataBoundItem as ReaderStatus;
+                    if (value != null && string.Equals(value.SerialNumber, selectedSerial, StringComparison.OrdinalIgnoreCase))
+                    {
+                        row.Selected = true;
+                        _readerGrid.CurrentCell = row.Cells.Count == 0 ? null : row.Cells[0];
+                        break;
+                    }
+                }
+            }
+        }
+
+        private static int ComPortNumber(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || !value.StartsWith("COM", StringComparison.OrdinalIgnoreCase)) return int.MaxValue;
+            int number;
+            return int.TryParse(value.Substring(3), out number) ? number : int.MaxValue;
+        }
+
+        private static string NormalizeDetectedEndpoint(string value)
+        {
+            value = (value ?? string.Empty).Trim().ToUpperInvariant();
+            return value.StartsWith("COM", StringComparison.OrdinalIgnoreCase) && value != "AUTO-COM" ? value : string.Empty;
         }
 
         private void OnRuntimeStateChanged()

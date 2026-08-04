@@ -4,35 +4,19 @@ using System.Linq;
 
 namespace NSPGatekeeper.Controller.Domain
 {
-    public sealed class ReaderAntennaConfig
-    {
-        public int AntennaId { get; set; }
-        public bool Enabled { get; set; }
-    }
-
     public sealed class ReaderDeviceConfig
     {
-        /// <summary>
-        /// Local runtime key only. Current NSP Core API does not accept device_code
-        /// from Controller runtime requests; SerialNumber is the server identity.
-        /// </summary>
-        public string DeviceCode { get; set; }
         public string DriverKey { get; set; }
-        public string DeviceName { get; set; }
         public string SerialNumber { get; set; }
-        public string Model { get; set; }
         public string Endpoint { get; set; }
         public int Port { get; set; }
         public bool Enabled { get; set; }
-        public int ConfigRevision { get; set; }
         public string ConfigHash { get; set; }
-
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
         public int TidStartAddress { get; set; }
         public int TidLength { get; set; }
-
-        public IList<ReaderAntennaConfig> Antennas { get; set; }
+        public IList<int> Ports { get; set; }
         public IDictionary<string, string> Options { get; set; }
 
         public ReaderDeviceConfig()
@@ -42,17 +26,16 @@ namespace NSPGatekeeper.Controller.Domain
             ReadIntervalMs = 200;
             TidStartAddress = 2;
             TidLength = 4;
-            Antennas = new List<ReaderAntennaConfig>();
+            Ports = new List<int>();
             Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
 
-        public IList<int> AntennaNumbers()
+        public IList<int> PortNumbers()
         {
-            return (Antennas ?? new List<ReaderAntennaConfig>())
-                .Where(x => x != null && x.Enabled && x.AntennaId > 0)
-                .Select(x => x.AntennaId)
+            return (Ports ?? new List<int>())
+                .Where(value => value >= 1 && value <= 16)
                 .Distinct()
-                .OrderBy(x => x)
+                .OrderBy(value => value)
                 .ToList();
         }
     }
@@ -60,19 +43,15 @@ namespace NSPGatekeeper.Controller.Domain
     public sealed class RfidDetection
     {
         public string EventUid { get; set; }
-        public string ControllerCode { get; set; }
-        public string DeviceCode { get; set; }
-        public string DeviceSerial { get; set; }
-        public int AntennaId { get; set; }
+        public string SerialNumber { get; set; }
+        public int PortNo { get; set; }
         public string Tid { get; set; }
         public double? RssiDbm { get; set; }
-        public long SequenceNo { get; set; }
         public DateTime DetectedAtUtc { get; set; }
     }
 
     public sealed class ReaderStatus
     {
-        public string DeviceCode { get; set; }
         public string DriverKey { get; set; }
         public string SerialNumber { get; set; }
         public string Model { get; set; }
@@ -80,15 +59,14 @@ namespace NSPGatekeeper.Controller.Domain
         public bool Online { get; set; }
         public string Message { get; set; }
         public string FirmwareVersion { get; set; }
-        public int ConfigRevision { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
         public DateTime UpdatedAtUtc { get; set; }
-        public IList<int> Antennas { get; set; }
+        public IList<int> Ports { get; set; }
 
         public ReaderStatus()
         {
-            Antennas = new List<int>();
+            Ports = new List<int>();
         }
     }
 
@@ -99,23 +77,19 @@ namespace NSPGatekeeper.Controller.Domain
         public int Attempts { get; set; }
     }
 
-    public sealed class MeasurementSessionConfig
+    public sealed class LaneCalibrationSessionConfig
     {
         public bool Available { get; set; }
-        public string MeasurementCode { get; set; }
-        public string ControllerCode { get; set; }
+        public string LaneCalibrationCode { get; set; }
         public string Status { get; set; }
         public string DesiredState { get; set; }
         public int Revision { get; set; }
-        public DateTime? PlannedStartAtUtc { get; set; }
-        public DateTime? PlannedEndAtUtc { get; set; }
-        public string Note { get; set; }
-        public IList<MeasurementReaderConfig> Readers { get; set; }
+        public IList<LaneCalibrationReaderConfig> Readers { get; set; }
 
-        public MeasurementSessionConfig()
+        public LaneCalibrationSessionConfig()
         {
             Revision = 1;
-            Readers = new List<MeasurementReaderConfig>();
+            Readers = new List<LaneCalibrationReaderConfig>();
         }
 
         public bool IsRunningDesired
@@ -123,56 +97,70 @@ namespace NSPGatekeeper.Controller.Domain
             get { return Available && string.Equals(DesiredState, "running", StringComparison.OrdinalIgnoreCase); }
         }
 
-        public MeasurementReaderConfig Reader(string serialNumber)
+        public LaneCalibrationReaderConfig Reader(string serialNumber)
         {
             var serial = (serialNumber ?? string.Empty).Trim();
-            return (Readers ?? new List<MeasurementReaderConfig>())
-                .FirstOrDefault(x => x != null && string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
+            return (Readers ?? new List<LaneCalibrationReaderConfig>())
+                .FirstOrDefault(value => value != null && string.Equals(value.SerialNumber, serial, StringComparison.OrdinalIgnoreCase));
         }
-
     }
 
-    public sealed class MeasurementReaderConfig
+    public sealed class LaneCalibrationReaderConfig
     {
         public string SerialNumber { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
-        public IList<int> Antennas { get; set; }
+        public IList<int> Ports { get; set; }
 
-        public MeasurementReaderConfig()
+        public LaneCalibrationReaderConfig()
         {
             PowerDbm = 30;
             ReadIntervalMs = 200;
-            Antennas = new List<int>();
+            Ports = new List<int>();
         }
     }
 
-    public sealed class MeasurementEvent
+    public sealed class LaneCalibrationEvent
     {
         public string EventUid { get; set; }
-        public string MeasurementCode { get; set; }
+        public string LaneCalibrationCode { get; set; }
         public int Revision { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
         public string SerialNumber { get; set; }
-        public int AntennaNo { get; set; }
+        public int PortNo { get; set; }
         public string Tid { get; set; }
         public double? RssiDbm { get; set; }
         public DateTime ReadAtUtc { get; set; }
     }
 
-    public sealed class MeasurementOutboxItem
+    public sealed class LaneCalibrationOutboxItem
     {
         public long Id { get; set; }
-        public MeasurementEvent Event { get; set; }
+        public LaneCalibrationEvent Event { get; set; }
         public int Attempts { get; set; }
     }
 
-    public sealed class CoreApiAuthResult
+    public sealed class BatchItemResult
     {
-        public bool Success { get; set; }
-        public string AccessToken { get; set; }
-        public DateTime? ExpiresAtUtc { get; set; }
+        public int Index { get; set; }
+        public string Status { get; set; }
         public string Message { get; set; }
+
+        public bool Delivered
+        {
+            get
+            {
+                return string.Equals(Status, "processed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Status, "duplicate", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(Status, "ignored", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        public bool Rejected
+        {
+            get { return string.Equals(Status, "rejected", StringComparison.OrdinalIgnoreCase); }
+        }
     }
+
 }

@@ -1,24 +1,18 @@
-NSP Gatekeeper Controller 1.3.1 - source validation
+NSP Controller 1.4.0 static validation scope
 
-Implemented Measurement changes:
-- no Measurement target list or target validation in Controller
-- multiple selected Readers with temporary Reader Power and Read Interval
-- explicit selected antenna subset per Reader
-- Measurement Revision support
-- every TID seen on selected Measurement Reader/Antenna is persisted to the Measurement outbox
-- selected Reader isolated from Parking while Measurement is active
-- temporary Reader Power and Read Interval applied through Reader runtime configuration
-- operational Reader configuration restored when Measurement stops
-- Measurement outbox persists revision + power_dbm + read_interval_ms for retry safety
-- Measurement API events include revision + power_dbm + read_interval_ms
-- Controller Measurement configuration contains no RFID target list; Edge owns target filtering
+- C# delimiter/string/comment lexical validation
+- XML parsing: App.config, project file and manifest
+- PostgreSQL schema/reference consistency checks
+- API route and JSON field audit against current Edge source
+- forbidden business ownership scan
+- Reader Port terminology scan
+- duplicate type/method name scan
+- archive integrity and SHA-256 generation
 
-Static validation performed:
-- App.config XML parsed successfully
-- NSPGatekeeper.Controller.csproj XML parsed successfully
-- app.manifest XML parsed successfully
-- C# source changes and API/SQL field mapping inspected
-- database/init_database.sql contains idempotent revision/power/read-interval column guards
+Expected API fields:
+- Reader config: ports[].port_no
+- Reader status: ports[]
+- Parking detection: serial_number + port_no
+- Lane Calibration event: serial_number + port_no
 
-A .NET Framework compiler/MSBuild is not available in the current build environment,
-so a full compile/runtime test was not performed here.
+No .NET SDK/MSBuild compiler is available in the analysis environment. A Release x86 and x64 build on Windows remains required before deployment.

@@ -35,9 +35,8 @@ namespace NSPGatekeeper.Controller.Services
 
         public bool Running { get { lock (_gate) return _running; } }
         public string ConnectionMessage { get { lock (_gate) return _connectionMessage; } }
-        public string ServerUrl { get { return _coreApi.BaseUrl; } }
         public string Mode { get { return _readers.CurrentMode; } }
-        public string MeasurementCode { get { return _readers.CurrentMeasurementCode; } }
+        public string LaneCalibrationCode { get { return _readers.CurrentLaneCalibrationCode; } }
 
         public event Action StateChanged;
 
@@ -50,16 +49,15 @@ namespace NSPGatekeeper.Controller.Services
                 var token = _cts.Token;
                 _running = true;
 
-                // Cached technical Reader profiles allow local startup while Edge is temporarily unavailable.
                 _readers.StartCachedConfiguration();
 
-                _tasks.Add(Task.Run(() => RunLoop("heartbeat", HeartbeatOnce, TimeSpan.FromSeconds(_settings.HeartbeatIntervalSec), token)));
-                _tasks.Add(Task.Run(() => RunLoop("device-config", PullDeviceConfigOnce, TimeSpan.FromSeconds(_settings.DeviceConfigIntervalSec), token)));
-                _tasks.Add(Task.Run(() => RunLoop("device-status", ReportDeviceStatusOnce, TimeSpan.FromSeconds(_settings.DeviceStatusIntervalSec), token)));
-                _tasks.Add(Task.Run(() => RunLoop("parking-push", PushDetectionsOnce, TimeSpan.FromMilliseconds(_settings.DetectionPushIntervalMs), token)));
-                _tasks.Add(Task.Run(() => RunLoop("measurement-pull", PullMeasurementOnce, TimeSpan.FromSeconds(_settings.MeasurementPollIntervalSec), token)));
-                _tasks.Add(Task.Run(() => RunLoop("measurement-push", PushMeasurementEventsOnce, TimeSpan.FromMilliseconds(_settings.MeasurementPushIntervalMs), token)));
-                _tasks.Add(Task.Run(() => RunLoop("cleanup", CleanupOnce, TimeSpan.FromSeconds(_settings.CleanupIntervalSec), token)));
+                _tasks.Add(Task.Run(() => RunLoop("heartbeat", HeartbeatOnce, () => TimeSpan.FromSeconds(_settings.HeartbeatIntervalSec), token)));
+                _tasks.Add(Task.Run(() => RunLoop("reader-config", PullReaderConfigOnce, () => TimeSpan.FromSeconds(_settings.ReaderConfigIntervalSec), token)));
+                _tasks.Add(Task.Run(() => RunLoop("reader-status", ReportReaderStatusOnce, () => TimeSpan.FromSeconds(_settings.ReaderStatusIntervalSec), token)));
+                _tasks.Add(Task.Run(() => RunLoop("parking-push", PushDetectionsOnce, () => TimeSpan.FromMilliseconds(_settings.DetectionPushIntervalMs), token)));
+                _tasks.Add(Task.Run(() => RunLoop("lane-calibration-pull", PullLaneCalibrationOnce, LaneCalibrationPollInterval, token)));
+                _tasks.Add(Task.Run(() => RunLoop("lane-calibration-push", PushLaneCalibrationEventsOnce, () => TimeSpan.FromMilliseconds(_settings.LaneCalibrationPushIntervalMs), token)));
+                _tasks.Add(Task.Run(() => RunLoop("cleanup", CleanupOnce, () => TimeSpan.FromSeconds(_settings.CleanupIntervalSec), token)));
             }
             NotifyStateChanged();
         }
@@ -79,7 +77,7 @@ namespace NSPGatekeeper.Controller.Services
             }
             try { if (cts != null) cts.Cancel(); } catch { }
             try { Task.WaitAll(tasks, 4000); } catch { }
-            _readers.ClearMeasurement("controller_stopped");
+            _readers.ClearLaneCalibration("controller_stopped");
             NotifyStateChanged();
         }
 
@@ -113,21 +111,24 @@ namespace NSPGatekeeper.Controller.Services
             }
             catch (Exception ex)
             {
-                SetConnectionMessage(ex.Message);
+                var retryAfter = _coreApi.GetRateLimitRetryDelay(ex);
+                SetConnectionMessage(retryAfter.HasValue
+                    ? "Core API throttled; retrying in " + Math.Ceiling(retryAfter.Value.TotalSeconds) + " second(s)"
+                    : ex.Message);
                 throw;
             }
         }
 
-        public void PullDeviceConfigOnce()
+        public void PullReaderConfigOnce()
         {
-            var configs = _coreApi.PullDeviceConfigs();
+            var configs = _coreApi.PullReaderConfigs();
             _readers.ApplyServerConfiguration(configs);
-            if (_logger != null) _logger.Info("device-config", "Reader configuration synchronized", "count=" + configs.Count);
+            if (_logger != null) _logger.Info("reader-config", "Reader configuration synchronized", "count=" + configs.Count);
         }
 
-        public void ReportDeviceStatusOnce()
+        public void ReportReaderStatusOnce()
         {
-            _coreApi.ReportDeviceStatus(_readers.GetStatuses());
+            _coreApi.ReportReaderStatus(_readers.GetStatuses());
         }
 
         public void PushDetectionsOnce()
@@ -143,6 +144,7 @@ namespace NSPGatekeeper.Controller.Services
             }
             catch (Exception ex)
             {
+                if (_coreApi.IsRateLimitError(ex)) throw;
                 if (_coreApi.IsPermanentRequestError(ex))
                 {
                     _store.MarkDead(ids, ex.Message);
@@ -155,96 +157,91 @@ namespace NSPGatekeeper.Controller.Services
             }
         }
 
-        public void PullMeasurementOnce()
+        public void PullLaneCalibrationOnce()
         {
-            var currentCode = _readers.CurrentMeasurementCode;
-            var config = _coreApi.PullMeasurement(currentCode);
-            if (config == null || !config.Available)
+            var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
+            if (config == null || !config.Available || !config.IsRunningDesired)
             {
-                _readers.ClearMeasurement("no_session");
-                return;
-            }
-
-            if (!config.IsRunningDesired)
-            {
-                _readers.ClearMeasurement(config.Status ?? "stopped");
+                _readers.ClearLaneCalibration(config == null ? "no_session" : (config.Status ?? "stopped"));
                 NotifyStateChanged();
                 return;
             }
 
-            var now = DateTime.UtcNow;
-            if (config.PlannedEndAtUtc.HasValue && config.PlannedEndAtUtc.Value <= now)
+            try
             {
-                // Controller is the Measurement executor. When a scheduled Measurement
-                // window ends while the server still exposes it as ready/running, close it
-                // exactly once on the server and restore Parking mode locally.
-                _coreApi.ReportMeasurementStatus(config.MeasurementCode, "completed", now, "Measurement window completed by Controller");
-                _readers.ClearMeasurement("completed");
+                _readers.ApplyLaneCalibrationConfiguration(config);
+            }
+            catch (Exception ex)
+            {
+                _readers.ClearLaneCalibration("invalid_configuration");
+                _coreApi.ReportLaneCalibrationStatus(
+                    config.LaneCalibrationCode,
+                    "failed",
+                    DateTime.UtcNow,
+                    ex.Message);
+                if (_logger != null) _logger.Error("lane-calibration", "Lane Calibration configuration rejected", ex);
                 NotifyStateChanged();
                 return;
             }
 
-            if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase) &&
-                config.PlannedStartAtUtc.HasValue && config.PlannedStartAtUtc.Value > now)
-            {
-                // Session is released to this Controller but its scheduled window has not
-                // started yet. Keep normal Parking processing until planned_start_at.
-                if (string.Equals(currentCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase))
-                    _readers.ClearMeasurement("waiting_planned_start");
-                NotifyStateChanged();
-                return;
-            }
-
-            var isNew = !string.Equals(currentCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase)
-                        || _readers.CurrentMeasurementRevision != config.Revision;
-            _readers.ApplyMeasurementConfiguration(config);
-
-            // Ready -> Running is explicitly reported once. Subsequent polls receive status=running.
-            if (isNew && string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase))
             {
                 try
                 {
-                    _coreApi.ReportMeasurementStatus(config.MeasurementCode, "running", now, "Controller started Measurement mode");
+                    _coreApi.ReportLaneCalibrationStatus(
+                        config.LaneCalibrationCode,
+                        "running",
+                        DateTime.UtcNow,
+                        "Controller started Lane Calibration");
                 }
                 catch (Exception ex)
                 {
-                    if (_logger != null) _logger.Warn("measurement", "Could not report running status", ex.Message);
+                    if (_coreApi.IsRateLimitError(ex)) throw;
+                    if (_logger != null) _logger.Warn("lane-calibration", "Could not report Lane Calibration running status; next poll will retry", ex.Message);
                 }
             }
 
             NotifyStateChanged();
         }
 
-        public void PushMeasurementEventsOnce()
+        public void PushLaneCalibrationEventsOnce()
         {
-            var batch = _store.GetPendingMeasurementEvents(_settings.MeasurementBatchSize);
+            var batch = _store.GetPendingLaneCalibrationEvents(_settings.LaneCalibrationBatchSize);
             if (batch.Count == 0) return;
 
-            // The API contract accepts one measurement_code per request. Keep old pending
-            // sessions isolated so a reconnect never mixes events from different sessions.
-            var measurementCode = batch[0].Event.MeasurementCode;
+            var laneCalibrationCode = batch[0].Event.LaneCalibrationCode;
             var sameSession = batch
-                .Where(x => string.Equals(x.Event.MeasurementCode, measurementCode, StringComparison.OrdinalIgnoreCase))
-                .Take(Math.Min(100, _settings.MeasurementBatchSize))
+                .Where(x => string.Equals(x.Event.LaneCalibrationCode, laneCalibrationCode, StringComparison.OrdinalIgnoreCase))
+                .Take(Math.Min(100, _settings.LaneCalibrationBatchSize))
                 .ToList();
             var ids = sameSession.Select(x => x.Id).ToList();
 
             try
             {
-                _coreApi.PushMeasurementEvents(measurementCode, sameSession.Select(x => x.Event).ToList());
-                _store.MarkMeasurementSent(ids);
-                if (_logger != null) _logger.Info("measurement-push", "Measurement event batch pushed", "code=" + measurementCode + "; count=" + sameSession.Count);
+                var results = _coreApi.PushLaneCalibrationEvents(laneCalibrationCode, sameSession.Select(x => x.Event).ToList());
+                var deliveredIds = results.Where(result => result.Delivered).Select(result => sameSession[result.Index].Id).ToList();
+                var rejected = results.Where(result => result.Rejected).ToList();
+                if (deliveredIds.Count > 0) _store.MarkLaneCalibrationSent(deliveredIds);
+                if (rejected.Count > 0)
+                {
+                    var rejectedIds = rejected.Select(result => sameSession[result.Index].Id).ToList();
+                    var error = string.Join("; ", rejected.Select(result => result.Message ?? "rejected").Distinct().ToArray());
+                    _store.MarkLaneCalibrationDead(rejectedIds, error);
+                    if (_logger != null) _logger.Warn("lane-calibration-push", "Lane Calibration events rejected", "count=" + rejected.Count + "; error=" + error);
+                }
+                if (_logger != null) _logger.Info("lane-calibration-push", "Lane Calibration event batch delivered", "code=" + laneCalibrationCode + "; delivered=" + deliveredIds.Count + "; rejected=" + rejected.Count);
             }
             catch (Exception ex)
             {
+                if (_coreApi.IsRateLimitError(ex)) throw;
                 if (_coreApi.IsPermanentRequestError(ex))
                 {
-                    _store.MarkMeasurementDead(ids, ex.Message);
-                    if (_logger != null) _logger.Error("measurement-push", "Permanent API error; Measurement batch moved to dead state", ex);
+                    _store.MarkLaneCalibrationDead(ids, ex.Message);
+                    if (_logger != null) _logger.Error("lane-calibration-push", "Permanent API error; Lane Calibration batch moved to dead state", ex);
                     return;
                 }
                 var attempts = sameSession.Max(x => x.Attempts) + 1;
-                _store.MarkMeasurementFailed(ids, ex.Message, attempts);
+                _store.MarkLaneCalibrationFailed(ids, ex.Message, attempts);
                 throw;
             }
         }
@@ -254,19 +251,53 @@ namespace NSPGatekeeper.Controller.Services
             _store.CleanupSent(_settings.SentDetectionRetentionDays);
         }
 
-        private void RunLoop(string name, Action action, TimeSpan interval, CancellationToken token)
+        private void RunLoop(string name, Action action, Func<TimeSpan> intervalProvider, CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
-                try { action(); }
-                catch (OperationCanceledException) { return; }
+                var delay = WorkerInterval(intervalProvider);
+                try
+                {
+                    action();
+                    delay = WorkerInterval(intervalProvider);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
                 catch (Exception ex)
                 {
-                    if (_logger != null) _logger.Warn(name, "Worker iteration failed", ex.Message);
+                    var retryAfter = _coreApi.GetRateLimitRetryDelay(ex);
+                    if (retryAfter.HasValue)
+                    {
+                        if (retryAfter.Value > delay) delay = retryAfter.Value;
+                        if (_logger != null)
+                            _logger.Warn(name, "Core API request deferred by rate control",
+                                "retry_in_sec=" + Math.Ceiling(delay.TotalSeconds) + "; reason=" + ex.Message);
+                    }
+                    else if (_logger != null)
+                    {
+                        _logger.Warn(name, "Worker iteration failed", ex.Message);
+                    }
                 }
 
-                if (token.WaitHandle.WaitOne(interval)) return;
+                if (token.WaitHandle.WaitOne(delay)) return;
             }
+        }
+
+        private TimeSpan LaneCalibrationPollInterval()
+        {
+            return TimeSpan.FromSeconds(string.IsNullOrWhiteSpace(_readers.CurrentLaneCalibrationCode)
+                ? _settings.LaneCalibrationIdlePollIntervalSec
+                : _settings.LaneCalibrationActivePollIntervalSec);
+        }
+
+        private static TimeSpan WorkerInterval(Func<TimeSpan> intervalProvider)
+        {
+            var value = intervalProvider == null ? TimeSpan.FromSeconds(1) : intervalProvider();
+            if (value < TimeSpan.FromMilliseconds(100)) return TimeSpan.FromMilliseconds(100);
+            if (value > TimeSpan.FromDays(1)) return TimeSpan.FromDays(1);
+            return value;
         }
 
         private void SetConnectionMessage(string value)

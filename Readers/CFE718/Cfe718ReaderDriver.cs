@@ -21,19 +21,12 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         }
 
         public string DriverKey { get { return "cf-e718"; } }
-        public string DisplayName { get { return "CHAFON CF-E718 / UHFReader288"; } }
-
         public IReaderRuntime Create(ReaderDeviceConfig config)
         {
             return new Cfe718ReaderRuntime(config, _logger);
         }
     }
 
-    /// <summary>
-    /// One instance owns exactly one physical reader.
-    /// It continuously reads TID and emits every SDK callback as a raw detection.
-    /// It emits raw reader data only; business processing is owned by Edge.
-    /// </summary>
     internal sealed class Cfe718ReaderRuntime : IReaderRuntime
     {
         private readonly FileLogger _logger;
@@ -44,10 +37,10 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         private readonly ReaderDeviceConfig _config;
         private Thread _thread;
         private Cfe718Native.RFIDCallBack _callback;
-        private long _sequence;
-        private int _currentAntennaId;
+        private int _currentPortNo;
         private bool _disposed;
         private ReaderStatus _status;
+        private string _resolvedEndpoint;
 
         public Cfe718ReaderRuntime(ReaderDeviceConfig config, FileLogger logger)
         {
@@ -56,10 +49,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             _status = CreateStatus(false, "stopped");
         }
 
-        public string DeviceCode { get { return _config.DeviceCode; } }
-        public ReaderDeviceConfig Configuration { get { return _config; } }
-        public ReaderStatus Status { get { lock (_statusGate) return CloneStatus(_status); } }
-
         public event Action<RfidDetection> DetectionReceived;
         public event Action<ReaderStatus> StatusChanged;
 
@@ -67,7 +56,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             ThrowIfDisposed();
             if (_thread != null && _thread.IsAlive) return;
-            _thread = new Thread(Run) { IsBackground = true, Name = "RFID " + _config.DeviceCode };
+            _thread = new Thread(Run) { IsBackground = true, Name = "RFID " + _config.SerialNumber };
             _thread.Start();
         }
 
@@ -102,19 +91,19 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                     SetStatus(true, "inventory_running");
                     if (_logger != null) _logger.Info("reader-cf-e718", "RFID inventory started", DescribeEndpoint());
 
-                    var antennas = EnabledAntennas();
+                    var ports = EnabledPorts();
                     while (!_cts.IsCancellationRequested)
                     {
-                        foreach (var antennaId in antennas)
+                        foreach (var portNo in ports)
                         {
                             if (_cts.IsCancellationRequested) break;
-                            Interlocked.Exchange(ref _currentAntennaId, antennaId);
-                            var ret = InventoryOnce(ref comAddress, handle, antennaId);
+                            Interlocked.Exchange(ref _currentPortNo, portNo);
+                            var ret = InventoryOnce(ref comAddress, handle, portNo);
                             if (!IsAcceptedInventoryReturn(ret))
-                                throw new InvalidOperationException("Inventory_G2 failed. antenna=" + antennaId + "; sdk_return=" + ret);
-                            Wait(ReadInt("antennaDelayMs", 3, 0, 1000));
+                                throw new InvalidOperationException("Inventory_G2 failed. port=" + portNo + "; sdk_return=" + ret);
+                            Wait(ReadInt("portDelayMs", 3, 0, 1000));
                         }
-                        Interlocked.Exchange(ref _currentAntennaId, 0);
+                        Interlocked.Exchange(ref _currentPortNo, 0);
                         Wait(ReadInt("loopDelayMs", 1, 0, 1000));
                     }
                 }
@@ -129,7 +118,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 }
                 finally
                 {
-                    Interlocked.Exchange(ref _currentAntennaId, 0);
+                    Interlocked.Exchange(ref _currentPortNo, 0);
                     if (handle != -1)
                     {
                         try { Cfe718Native.StopInventory(ref comAddress, handle); } catch { }
@@ -151,29 +140,23 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 var tid = Clean(tag.UID);
                 if (string.IsNullOrWhiteSpace(tid)) return;
 
-                // Inventory is executed one configured antenna at a time. Prefer the
-                // Controller-selected antenna because RFIDTag.ANT encoding differs between
-                // UHFReader288 SDK variants; fall back to the SDK value only when needed.
-                // In both cases the antenna must exist in the current server configuration.
-                var currentAntennaId = Thread.VolatileRead(ref _currentAntennaId);
-                var reportedAntennaId = DecodeAntenna(tag.ANT);
-                var antennaId = IsEnabledAntenna(currentAntennaId) ? currentAntennaId : reportedAntennaId;
-                if (!IsEnabledAntenna(antennaId))
+                var currentPortNo = Thread.VolatileRead(ref _currentPortNo);
+                var reportedPortNo = DecodeReportedPort(tag.ANT);
+                var portNo = IsEnabledPort(currentPortNo) ? currentPortNo : reportedPortNo;
+                if (!IsEnabledPort(portNo))
                 {
                     if (_logger != null)
-                        _logger.Warn("reader-cf-e718", "Dropped detection from disabled/unconfigured antenna",
-                            "device=" + _config.DeviceCode + "; ant=" + antennaId.ToString(CultureInfo.InvariantCulture));
+                        _logger.Warn("reader-cf-e718", "Dropped detection from disabled or unconfigured Reader Port",
+                            "serial=" + _config.SerialNumber + "; port=" + portNo.ToString(CultureInfo.InvariantCulture));
                     return;
                 }
 
                 var detection = new RfidDetection
                 {
-                    DeviceCode = _config.DeviceCode,
-                    DeviceSerial = _status.SerialNumber ?? _config.SerialNumber,
-                    AntennaId = antennaId,
+                    SerialNumber = _status.SerialNumber ?? _config.SerialNumber,
+                    PortNo = portNo,
                     Tid = tid.ToUpperInvariant(),
                     RssiDbm = Convert.ToDouble(tag.RSSI, CultureInfo.InvariantCulture),
-                    SequenceNo = Interlocked.Increment(ref _sequence),
                     DetectedAtUtc = DateTime.UtcNow
                 };
 
@@ -193,7 +176,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             if (_logger == null || detection == null) return;
             var now = detection.DetectedAtUtc;
-            var key = detection.Tid + "|" + detection.AntennaId.ToString(CultureInfo.InvariantCulture);
+            var key = detection.Tid + "|" + detection.PortNo.ToString(CultureInfo.InvariantCulture);
             lock (_detectionLogGate)
             {
                 DateTime last;
@@ -207,16 +190,16 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             }
 
             _logger.Info("reader-detection", "Detected RFID TID",
-                "device=" + _config.DeviceCode
-                + "; ant=" + detection.AntennaId.ToString(CultureInfo.InvariantCulture)
+                "serial=" + _config.SerialNumber
+                + "; port=" + detection.PortNo.ToString(CultureInfo.InvariantCulture)
                 + "; tid=" + detection.Tid
                 + "; rssi=" + (detection.RssiDbm.HasValue ? detection.RssiDbm.Value.ToString(CultureInfo.InvariantCulture) : ""));
         }
 
         private void ApplyConfiguration(ref byte comAddress, int handle)
         {
-            var antennas = EnabledAntennas();
-            if (antennas.Count == 0) throw new InvalidOperationException("At least one antenna must be enabled.");
+            var ports = EnabledPorts();
+            if (ports.Count == 0) throw new InvalidOperationException("At least one Reader Port must be enabled.");
 
             var tidAddr = ClampByte(_config.TidStartAddress, 0, 255);
             var tidLen = ClampByte(_config.TidLength, 1, 255);
@@ -228,56 +211,56 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             var scanRet = Cfe718Native.SetInventoryScanTime(ref comAddress, scanTime, handle);
             if (scanRet != 0 && _logger != null) _logger.Warn("reader-cf-e718", "SetInventoryScanTime returned warning", "ret=" + scanRet);
 
-            ApplyAntennaMask(ref comAddress, handle, antennas);
-            ApplyAntennaPower(ref comAddress, handle);
+            ApplyPortMask(ref comAddress, handle, ports);
+            ApplyPortPower(ref comAddress, handle);
         }
 
-        private void ApplyAntennaMask(ref byte comAddress, int handle, IList<int> enabledAntennas)
+        private void ApplyPortMask(ref byte comAddress, int handle, IList<int> enabledPorts)
         {
-            var max = enabledAntennas.Max();
+            var max = enabledPorts.Max();
             int ret;
             if (max <= 4)
             {
                 byte mask = 0;
-                foreach (var id in enabledAntennas) mask |= (byte)(1 << (id - 1));
+                foreach (var id in enabledPorts) mask |= (byte)(1 << (id - 1));
                 ret = Cfe718Native.SetAntennaMultiplexing4(ref comAddress, mask, handle);
             }
             else
             {
                 byte low = 0;
                 byte high = 0;
-                foreach (var id in enabledAntennas.Where(x => x >= 1 && x <= 16))
+                foreach (var id in enabledPorts.Where(x => x >= 1 && x <= 16))
                 {
                     if (id <= 8) low |= (byte)(1 << (id - 1));
                     else high |= (byte)(1 << (id - 9));
                 }
                 ret = Cfe718Native.SetAntennaMultiplexingExtended(ref comAddress, 0x00, high, low, handle);
             }
-            if (ret != 0 && _logger != null) _logger.Warn("reader-cf-e718", "Antenna mask apply returned warning", "ret=" + ret);
+            if (ret != 0 && _logger != null) _logger.Warn("reader-cf-e718", "Reader Port mask apply returned warning", "ret=" + ret);
         }
 
-        private void ApplyAntennaPower(ref byte comAddress, int handle)
+        private void ApplyPortPower(ref byte comAddress, int handle)
         {
-            var configured = (_config.Antennas ?? new List<ReaderAntennaConfig>()).Where(x => x.AntennaId >= 1 && x.AntennaId <= 16).ToList();
+            var configured = _config.PortNumbers();
             if (configured.Count == 0) return;
-            var length = Math.Max(4, configured.Max(x => x.AntennaId));
+            var length = Math.Max(4, configured.Max());
             if (length > 8) length = 16;
             else if (length > 4) length = 8;
 
             var powers = new byte[length];
-            var power = ClampByte(_config.PowerDbm <= 0 ? 30 : _config.PowerDbm, 0, 33);
+            var power = ClampByte(_config.PowerDbm, 0, 33);
             for (var i = 0; i < powers.Length; i++) powers[i] = power;
             var ret = Cfe718Native.SetAntennaPower(ref comAddress, powers, length, handle);
-            if (ret != 0 && _logger != null) _logger.Warn("reader-cf-e718", "Antenna power apply returned warning", "ret=" + ret);
+            if (ret != 0 && _logger != null) _logger.Warn("reader-cf-e718", "Reader Port power apply returned warning", "ret=" + ret);
         }
 
-        private int InventoryOnce(ref byte comAddress, int handle, int antennaId)
+        private int InventoryOnce(ref byte comAddress, int handle, int portNo)
         {
-            var selector = ToAntennaSelector(antennaId, false);
+            var selector = ToPortSelector(portNo, false);
             var ret = InventoryOnceWithSelector(ref comAddress, handle, selector);
             if (!IsRetryableSelectorReturn(ret)) return ret;
 
-            var alternate = ToAntennaSelector(antennaId, true);
+            var alternate = ToPortSelector(portNo, true);
             if (alternate == selector) return ret;
             var alternateRet = InventoryOnceWithSelector(ref comAddress, handle, alternate);
             return IsAcceptedInventoryReturn(alternateRet) ? alternateRet : ret;
@@ -322,15 +305,25 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             if (connection == "com")
             {
                 comPort = ParseComPort(endpoint);
+                int result;
                 if (comPort > 0)
-                    return Cfe718Native.OpenComPort(comPort, ref comAddress, ReadByte("baud", 6), ref handle);
-                comPort = 0;
-                return Cfe718Native.AutoOpenComPort(ref comPort, ref comAddress, ReadByte("baud", 6), ref handle);
+                {
+                    result = Cfe718Native.OpenComPort(comPort, ref comAddress, ReadByte("baud", 6), ref handle);
+                }
+                else
+                {
+                    comPort = 0;
+                    result = Cfe718Native.AutoOpenComPort(ref comPort, ref comAddress, ReadByte("baud", 6), ref handle);
+                }
+                if (result == 0 && comPort > 0) _resolvedEndpoint = "COM" + comPort;
+                return result;
             }
 
             if (string.IsNullOrWhiteSpace(endpoint)) throw new InvalidOperationException("Reader endpoint is required.");
             var port = _config.Port > 0 ? _config.Port : ReadInt("port", 4001, 1, 65535);
-            return Cfe718Native.OpenNetPort(port, endpoint, ref comAddress, ref handle);
+            var networkResult = Cfe718Native.OpenNetPort(port, endpoint, ref comAddress, ref handle);
+            if (networkResult == 0) _resolvedEndpoint = endpoint + ":" + port;
+            return networkResult;
         }
 
         private static void Close(int handle, int comPort)
@@ -357,43 +350,33 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             lock (_statusGate)
             {
-                // The serial configured by NSP Server is the canonical physical Reader
-                // identity. GetSeriaNo() exposes a vendor/module value that may differ
-                // from the chassis label, so it must not be used for identity validation.
                 _status.SerialNumber = _config.SerialNumber;
-                _status.Model = string.IsNullOrWhiteSpace(_config.Model) ? "CF-E718" : _config.Model;
+                _status.Model = "CF-E718";
                 if (!string.IsNullOrWhiteSpace(firmwareVersion)) _status.FirmwareVersion = firmwareVersion;
             }
         }
 
-        private bool IsEnabledAntenna(int antennaId)
+        private bool IsEnabledPort(int portNo)
         {
-            if (antennaId <= 0) return false;
-            return (_config.Antennas ?? new List<ReaderAntennaConfig>())
-                .Any(x => x != null && x.Enabled && x.AntennaId == antennaId);
+            if (portNo <= 0) return false;
+            return (_config.Ports ?? new List<int>()).Contains(portNo);
         }
 
-        private IList<int> EnabledAntennas()
+        private IList<int> EnabledPorts()
         {
-            var list = (_config.Antennas ?? new List<ReaderAntennaConfig>())
-                .Where(x => x.Enabled && x.AntennaId >= 1 && x.AntennaId <= 16)
-                .Select(x => x.AntennaId)
-                .Distinct()
-                .OrderBy(x => x)
-                .ToList();
-            return list;
+            return _config.PortNumbers();
         }
 
-        private byte ToAntennaSelector(int antennaId, bool alternate)
+        private byte ToPortSelector(int portNo, bool alternate)
         {
-            var mode = ReadString("antennaSelectorMode", "sequential").ToLowerInvariant();
-            var sequential = (byte)(0x80 + Math.Max(0, antennaId - 1));
-            var bitmask = (byte)(0x80 | (1 << Math.Max(0, antennaId - 1)));
+            var mode = ReadString("portSelectorMode", "sequential").ToLowerInvariant();
+            var sequential = (byte)(0x80 + Math.Max(0, portNo - 1));
+            var bitmask = (byte)(0x80 | (1 << Math.Max(0, portNo - 1)));
             if (mode == "bitmask") return alternate ? sequential : bitmask;
             return alternate ? bitmask : sequential;
         }
 
-        private static int DecodeAntenna(byte value)
+        private static int DecodeReportedPort(byte value)
         {
             if (value >= 0x80 && value <= 0x8F) return (value & 0x0F) + 1;
             if (value == 1 || value == 2 || value == 4 || value == 8) return value == 1 ? 1 : value == 2 ? 2 : value == 4 ? 3 : 4;
@@ -417,6 +400,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             {
                 _status.Online = online;
                 _status.Message = message;
+                _status.Endpoint = DescribeEndpoint();
                 _status.UpdatedAtUtc = DateTime.UtcNow;
                 snapshot = CloneStatus(_status);
             }
@@ -428,15 +412,15 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             return new ReaderStatus
             {
-                DeviceCode = _config.DeviceCode,
                 DriverKey = "cf-e718",
                 SerialNumber = _config.SerialNumber,
-                Model = _config.Model,
+                Model = "CF-E718",
                 Endpoint = DescribeEndpoint(),
                 Online = online,
                 Message = message,
-                ConfigRevision = _config.ConfigRevision,
-                Antennas = _config.AntennaNumbers(),
+                PowerDbm = Math.Max(0, Math.Min(33, _config.PowerDbm)),
+                ReadIntervalMs = Math.Max(1, Math.Min(60000, _config.ReadIntervalMs)),
+                Ports = _config.PortNumbers(),
                 UpdatedAtUtc = DateTime.UtcNow
             };
         }
@@ -445,7 +429,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             return new ReaderStatus
             {
-                DeviceCode = s.DeviceCode,
                 DriverKey = s.DriverKey,
                 SerialNumber = s.SerialNumber,
                 Model = s.Model,
@@ -453,15 +436,20 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 Online = s.Online,
                 Message = s.Message,
                 FirmwareVersion = s.FirmwareVersion,
-                Antennas = s.Antennas == null ? new List<int>() : new List<int>(s.Antennas),
+                PowerDbm = s.PowerDbm,
+                ReadIntervalMs = s.ReadIntervalMs,
+                Ports = s.Ports == null ? new List<int>() : new List<int>(s.Ports),
                 UpdatedAtUtc = s.UpdatedAtUtc,
-                ConfigRevision = s.ConfigRevision
             };
         }
 
         private string DescribeEndpoint()
         {
-            return (_config.Endpoint ?? string.Empty) + (_config.Port > 0 ? ":" + _config.Port : string.Empty);
+            if (!string.IsNullOrWhiteSpace(_resolvedEndpoint)) return _resolvedEndpoint;
+            var endpoint = Clean(_config.Endpoint);
+            if (!string.IsNullOrWhiteSpace(endpoint))
+                return endpoint + (_config.Port > 0 && !endpoint.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ? ":" + _config.Port : string.Empty);
+            return string.Equals(ReadString("connection", "com"), "com", StringComparison.OrdinalIgnoreCase) ? "AUTO-COM" : string.Empty;
         }
 
         private string ReadString(string key, string fallback)
@@ -500,10 +488,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             if (milliseconds <= 0 || _cts.IsCancellationRequested) return;
 
-            // Cancellation is a normal runtime shutdown/restart signal. WaitOne returns
-            // immediately when Stop() cancels the token, so no exception is required to
-            // wake this reader thread. The surrounding loops re-check the token before
-            // performing another inventory or reconnect attempt.
             _cts.Token.WaitHandle.WaitOne(milliseconds);
         }
 

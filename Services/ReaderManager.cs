@@ -19,9 +19,9 @@ namespace NSPGatekeeper.Controller.Services
         private readonly object _gate = new object();
         private readonly Dictionary<string, RuntimeHandle> _runtimes = new Dictionary<string, RuntimeHandle>(StringComparer.OrdinalIgnoreCase);
         private readonly Queue<RfidDetection> _recentDetections = new Queue<RfidDetection>();
-        private MeasurementSessionConfig _measurement;
-        private HashSet<string> _measurementReaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private HashSet<string> _measurementPairs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private LaneCalibrationSessionConfig _laneCalibration;
+        private HashSet<string> _laneCalibrationReaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _laneCalibrationReaderPorts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private bool _disposed;
 
         public ReaderManager(ReaderDriverRegistry registry, LocalStore store, DetectionOutboxWriter outbox, FileLogger logger, AppSettings settings)
@@ -33,14 +33,11 @@ namespace NSPGatekeeper.Controller.Services
             _settings = settings ?? throw new ArgumentNullException("settings");
         }
 
-        public event Action<RfidDetection> DetectionObserved;
-        public event Action<ReaderStatus> StatusObserved;
-
-        public string CurrentMeasurementCode
+        public string CurrentLaneCalibrationCode
         {
             get
             {
-                lock (_gate) return _measurement == null ? string.Empty : (_measurement.MeasurementCode ?? string.Empty);
+                lock (_gate) return _laneCalibration == null ? string.Empty : (_laneCalibration.LaneCalibrationCode ?? string.Empty);
             }
         }
 
@@ -48,33 +45,25 @@ namespace NSPGatekeeper.Controller.Services
         {
             get
             {
-                lock (_gate) return _measurement != null && _measurement.IsRunningDesired ? "Measurement" : "Parking";
-            }
-        }
-
-        public int CurrentMeasurementRevision
-        {
-            get
-            {
-                lock (_gate) return _measurement == null ? 0 : _measurement.Revision;
+                lock (_gate) return _laneCalibration != null && _laneCalibration.IsRunningDesired ? "Lane Calibration" : "Parking";
             }
         }
 
 
         public void StartCachedConfiguration()
         {
-            ApplyRuntimeConfiguration(_store.GetDeviceConfigs());
+            ApplyRuntimeConfiguration(_store.GetReaderConfigs());
         }
 
         public void ReloadCachedConfiguration()
         {
-            ApplyRuntimeConfiguration(_store.GetDeviceConfigs());
+            ApplyRuntimeConfiguration(_store.GetReaderConfigs());
         }
 
         public void ApplyServerConfiguration(IList<ReaderDeviceConfig> serverConfigs)
         {
             serverConfigs = serverConfigs ?? new List<ReaderDeviceConfig>();
-            var cached = _store.GetDeviceConfigs()
+            var cached = _store.GetReaderConfigs()
                 .Where(x => x != null && !string.IsNullOrWhiteSpace(x.SerialNumber))
                 .ToDictionary(x => x.SerialNumber.Trim().ToUpperInvariant(), StringComparer.OrdinalIgnoreCase);
 
@@ -88,98 +77,128 @@ namespace NSPGatekeeper.Controller.Services
                 merged.Add(MergePhysicalProfile(incoming, local));
             }
 
-            foreach (var config in merged) _store.UpsertDeviceConfig(config);
-            _store.DisableDevicesNotIn(merged.Select(x => x.SerialNumber).ToList());
+            foreach (var config in merged) _store.UpsertReaderConfig(config);
+            _store.DisableReadersNotIn(merged.Select(x => x.SerialNumber).ToList());
 
-            MeasurementSessionConfig measurement;
-            lock (_gate) measurement = _measurement;
-            ApplyRuntimeConfiguration(BuildEffectiveConfigs(merged, measurement));
+            LaneCalibrationSessionConfig laneCalibration;
+            lock (_gate) laneCalibration = _laneCalibration;
+            ApplyRuntimeConfiguration(BuildEffectiveReaderConfigs(merged, laneCalibration));
         }
 
-        public void ApplyMeasurementConfiguration(MeasurementSessionConfig config)
+        public void ApplyLaneCalibrationConfiguration(LaneCalibrationSessionConfig config)
         {
-            if (config == null || !config.IsRunningDesired || string.IsNullOrWhiteSpace(config.MeasurementCode))
+            if (config == null || !config.IsRunningDesired || string.IsNullOrWhiteSpace(config.LaneCalibrationCode))
             {
-                ClearMeasurement("server_stopped");
+                ClearLaneCalibration("server_stopped");
                 return;
             }
 
-            config.MeasurementCode = (config.MeasurementCode ?? string.Empty).Trim().ToUpperInvariant();
+            config.LaneCalibrationCode = (config.LaneCalibrationCode ?? string.Empty).Trim().ToUpperInvariant();
             if (config.Revision <= 0) config.Revision = 1;
-            config.Readers = (config.Readers ?? new List<MeasurementReaderConfig>())
+            config.Readers = (config.Readers ?? new List<LaneCalibrationReaderConfig>())
                 .Where(x => x != null && !string.IsNullOrWhiteSpace(x.SerialNumber))
-                .Select(x => new MeasurementReaderConfig
+                .Select(x => new LaneCalibrationReaderConfig
                 {
                     SerialNumber = x.SerialNumber.Trim().ToUpperInvariant(),
                     PowerDbm = Math.Max(0, Math.Min(40, x.PowerDbm)),
                     ReadIntervalMs = Math.Max(1, Math.Min(60000, x.ReadIntervalMs)),
-                    Antennas = (x.Antennas ?? new List<int>())
-                        .Where(number => number > 0)
+                    Ports = (x.Ports ?? new List<int>())
+                        .Where(number => number >= 1 && number <= 16)
                         .Distinct()
                         .OrderBy(number => number)
                         .ToList()
                 })
-                .Where(x => x.Antennas.Count > 0)
+                .Where(x => x.Ports.Count > 0)
                 .GroupBy(x => x.SerialNumber, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.First())
                 .OrderBy(x => x.SerialNumber, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+            ValidateLaneCalibrationReaders(config);
 
             bool changed;
             lock (_gate)
             {
                 var newPairs = new HashSet<string>(
                     config.Readers.SelectMany(reader =>
-                        reader.Antennas.Select(antennaNo => PairKey(reader.SerialNumber, antennaNo))),
+                        reader.Ports.Select(portNo => ReaderPortKey(reader.SerialNumber, portNo))),
                     StringComparer.OrdinalIgnoreCase);
                 var newReaders = new HashSet<string>(
                     config.Readers.Select(reader => reader.SerialNumber),
                     StringComparer.OrdinalIgnoreCase);
-                changed = _measurement == null
-                          || !string.Equals(_measurement.MeasurementCode, config.MeasurementCode, StringComparison.OrdinalIgnoreCase)
-                          || _measurement.Revision != config.Revision
-                          || !string.Equals(MeasurementReaderSignature(_measurement), MeasurementReaderSignature(config), StringComparison.Ordinal);
+                changed = _laneCalibration == null
+                          || !string.Equals(_laneCalibration.LaneCalibrationCode, config.LaneCalibrationCode, StringComparison.OrdinalIgnoreCase)
+                          || _laneCalibration.Revision != config.Revision
+                          || !string.Equals(LaneCalibrationReaderSignature(_laneCalibration), LaneCalibrationReaderSignature(config), StringComparison.Ordinal);
 
-                _measurement = config;
-                _measurementReaders = newReaders;
-                _measurementPairs = newPairs;
+                _laneCalibration = config;
+                _laneCalibrationReaders = newReaders;
+                _laneCalibrationReaderPorts = newPairs;
             }
 
             if (changed)
             {
-                ApplyRuntimeConfiguration(BuildEffectiveConfigs(_store.GetDeviceConfigs(), config));
+                ApplyRuntimeConfiguration(BuildEffectiveReaderConfigs(_store.GetReaderConfigs(), config));
                 if (_logger != null)
                     _logger.Info(
-                        "measurement",
-                        "Measurement runtime applied",
-                        "code=" + config.MeasurementCode
+                        "lane-calibration",
+                        "Lane Calibration runtime applied",
+                        "code=" + config.LaneCalibrationCode
                         + "; revision=" + config.Revision
                         + "; readers=" + config.Readers.Count
-                        + "; antennas=" + _measurementPairs.Count);
+                        + "; ports=" + _laneCalibrationReaderPorts.Count);
             }
         }
 
+        private void ValidateLaneCalibrationReaders(LaneCalibrationSessionConfig config)
+        {
+            if (config.Readers.Count == 0)
+                throw new InvalidOperationException("Lane Calibration has no Reader Port configuration.");
 
-        private static string MeasurementReaderSignature(MeasurementSessionConfig config)
+            var operational = _store.GetReaderConfigs()
+                .Where(reader => reader != null && reader.Enabled && !string.IsNullOrWhiteSpace(reader.SerialNumber))
+                .ToDictionary(reader => reader.SerialNumber.Trim().ToUpperInvariant(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var calibrationReader in config.Readers)
+            {
+                ReaderDeviceConfig reader;
+                if (!operational.TryGetValue(calibrationReader.SerialNumber, out reader))
+                    throw new InvalidOperationException("Lane Calibration Reader is not configured on this Controller: " + calibrationReader.SerialNumber);
+
+                var invalidPorts = calibrationReader.Ports.Except(reader.PortNumbers()).OrderBy(value => value).ToList();
+                if (invalidPorts.Count > 0)
+                    throw new InvalidOperationException(
+                        "Lane Calibration contains unconfigured Reader Port(s): "
+                        + calibrationReader.SerialNumber + "/" + string.Join(",", invalidPorts));
+
+                var maxPower = MaximumPower(reader.DriverKey);
+                if (calibrationReader.PowerDbm > maxPower)
+                    throw new InvalidOperationException(
+                        "Lane Calibration power exceeds Reader driver capability: "
+                        + calibrationReader.SerialNumber + "; requested=" + calibrationReader.PowerDbm + "; maximum=" + maxPower);
+            }
+        }
+
+        private static string LaneCalibrationReaderSignature(LaneCalibrationSessionConfig config)
         {
             if (config == null) return string.Empty;
             return string.Join(";",
-                (config.Readers ?? new List<MeasurementReaderConfig>())
+                (config.Readers ?? new List<LaneCalibrationReaderConfig>())
                     .Where(reader => reader != null)
                     .OrderBy(reader => reader.SerialNumber, StringComparer.OrdinalIgnoreCase)
                     .Select(reader =>
                         (reader.SerialNumber ?? string.Empty).Trim().ToUpperInvariant()
                         + "|P" + reader.PowerDbm
                         + "|I" + reader.ReadIntervalMs
-                        + "|A" + string.Join(",", (reader.Antennas ?? new List<int>()).OrderBy(number => number))));
+                        + "|PORTS=" + string.Join(",", (reader.Ports ?? new List<int>()).OrderBy(number => number))));
         }
 
-        public void ClearMeasurement(string reason)
+        public void ClearLaneCalibration(string reason)
         {
             bool cleared;
-            lock (_gate) cleared = ClearMeasurementLocked(reason);
+            lock (_gate) cleared = ClearLaneCalibrationLocked(reason);
             if (cleared && !_disposed)
-                ApplyRuntimeConfiguration(_store.GetDeviceConfigs());
+                ApplyRuntimeConfiguration(_store.GetReaderConfigs());
         }
 
         public IList<ReaderStatus> GetStatuses()
@@ -195,14 +214,11 @@ namespace NSPGatekeeper.Controller.Services
         private ReaderDeviceConfig MergePhysicalProfile(ReaderDeviceConfig incoming, ReaderDeviceConfig local)
         {
             incoming.SerialNumber = (incoming.SerialNumber ?? string.Empty).Trim().ToUpperInvariant();
-            incoming.DeviceCode = incoming.SerialNumber;
             if (local != null)
             {
                 if (string.IsNullOrWhiteSpace(incoming.DriverKey)) incoming.DriverKey = local.DriverKey;
                 if (string.IsNullOrWhiteSpace(incoming.Endpoint)) incoming.Endpoint = local.Endpoint;
                 if (incoming.Port <= 0) incoming.Port = local.Port;
-                if (string.IsNullOrWhiteSpace(incoming.Model)) incoming.Model = local.Model;
-                if (string.IsNullOrWhiteSpace(incoming.DeviceName)) incoming.DeviceName = local.DeviceName;
 
                 if (local.Options != null)
                 {
@@ -212,13 +228,17 @@ namespace NSPGatekeeper.Controller.Services
             }
 
             if (string.IsNullOrWhiteSpace(incoming.DriverKey)) incoming.DriverKey = "cf-e718";
+            incoming.DriverKey = incoming.DriverKey.Trim().ToLowerInvariant();
+            incoming.PowerDbm = NormalizePower(incoming.DriverKey, incoming.PowerDbm);
             if (string.IsNullOrWhiteSpace(incoming.Endpoint) &&
                 string.Equals(incoming.DriverKey, "cf-e718", StringComparison.OrdinalIgnoreCase) &&
                 !incoming.Options.ContainsKey("connection"))
             {
-                // CF-E718 native SDK can auto-open a serial/COM reader when no endpoint is known.
                 incoming.Options["connection"] = "com";
             }
+            incoming.Enabled = incoming.Enabled && incoming.PortNumbers().Count > 0;
+            if (!incoming.Enabled && _logger != null)
+                _logger.Warn("reader-config", "Reader has no runtime ports and will remain stopped", "serial=" + incoming.SerialNumber);
             return incoming;
         }
 
@@ -255,17 +275,15 @@ namespace NSPGatekeeper.Controller.Services
                         if (_logger != null) _logger.Error("reader-manager", "Reader runtime start failed: " + serial, ex);
                         OnStatus(new ReaderStatus
                         {
-                            DeviceCode = serial,
                             DriverKey = config.DriverKey,
                             SerialNumber = serial,
-                            Model = config.Model,
+                            Model = config.DriverKey,
                             Endpoint = config.Endpoint,
                             Online = false,
                             Message = ex.Message,
-                            ConfigRevision = config.ConfigRevision,
                             PowerDbm = config.PowerDbm,
                             ReadIntervalMs = config.ReadIntervalMs,
-                            Antennas = config.AntennaNumbers(),
+                            Ports = config.PortNumbers(),
                             UpdatedAtUtc = DateTime.UtcNow
                         });
                     }
@@ -275,21 +293,22 @@ namespace NSPGatekeeper.Controller.Services
 
         private void OnDetection(RfidDetection detection)
         {
-            if (detection == null || string.IsNullOrWhiteSpace(detection.DeviceSerial) || detection.AntennaId <= 0 || string.IsNullOrWhiteSpace(detection.Tid)) return;
-            detection.ControllerCode = _settings.ControllerCode ?? string.Empty;
-            detection.DeviceSerial = detection.DeviceSerial.Trim().ToUpperInvariant();
-            detection.DeviceCode = detection.DeviceSerial;
+            if (detection == null || string.IsNullOrWhiteSpace(detection.SerialNumber) || detection.PortNo <= 0 || string.IsNullOrWhiteSpace(detection.Tid)) return;
+            detection.SerialNumber = detection.SerialNumber.Trim().ToUpperInvariant();
             detection.Tid = detection.Tid.Trim().ToUpperInvariant();
             detection.EventUid = BuildEventUid("RFID");
 
-            bool measurementReader;
-            bool measurementPair;
-            MeasurementSessionConfig measurement;
+            bool laneCalibrationReader;
+            bool laneCalibrationReaderPort;
+            LaneCalibrationSessionConfig laneCalibration;
+            ReaderDeviceConfig appliedConfig = null;
             lock (_gate)
             {
-                measurement = _measurement;
-                measurementReader = measurement != null && measurement.IsRunningDesired && _measurementReaders.Contains(detection.DeviceSerial);
-                measurementPair = measurementReader && _measurementPairs.Contains(PairKey(detection.DeviceSerial, detection.AntennaId));
+                laneCalibration = _laneCalibration;
+                laneCalibrationReader = laneCalibration != null && laneCalibration.IsRunningDesired && _laneCalibrationReaders.Contains(detection.SerialNumber);
+                laneCalibrationReaderPort = laneCalibrationReader && _laneCalibrationReaderPorts.Contains(ReaderPortKey(detection.SerialNumber, detection.PortNo));
+                RuntimeHandle handle;
+                if (_runtimes.TryGetValue(detection.SerialNumber, out handle)) appliedConfig = handle.Config;
 
                 _recentDetections.Enqueue(detection);
                 while (_recentDetections.Count > 500) _recentDetections.Dequeue();
@@ -297,23 +316,20 @@ namespace NSPGatekeeper.Controller.Services
 
             try
             {
-                if (measurementReader)
+                if (laneCalibrationReader)
                 {
-                    // Measurement scope changes only Reader runtime settings. The Controller
-                    // reports every TID seen on the selected Reader/Antenna; Edge owns target
-                    // matching and all Measurement business validation.
-                    if (measurementPair)
+                    if (laneCalibrationReaderPort)
                     {
-                        var readerConfig = measurement.Reader(detection.DeviceSerial);
-                        _outbox.EnqueueMeasurement(new MeasurementEvent
+                        var requestedConfig = laneCalibration.Reader(detection.SerialNumber);
+                        _outbox.EnqueueLaneCalibration(new LaneCalibrationEvent
                         {
-                            EventUid = BuildEventUid("MEAS"),
-                            MeasurementCode = measurement.MeasurementCode,
-                            Revision = measurement.Revision,
-                            PowerDbm = readerConfig == null ? 0 : readerConfig.PowerDbm,
-                            ReadIntervalMs = readerConfig == null ? 200 : readerConfig.ReadIntervalMs,
-                            SerialNumber = detection.DeviceSerial,
-                            AntennaNo = detection.AntennaId,
+                            EventUid = BuildEventUid("CAL"),
+                            LaneCalibrationCode = laneCalibration.LaneCalibrationCode,
+                            Revision = laneCalibration.Revision,
+                            PowerDbm = appliedConfig == null ? (requestedConfig == null ? 0 : requestedConfig.PowerDbm) : appliedConfig.PowerDbm,
+                            ReadIntervalMs = appliedConfig == null ? (requestedConfig == null ? 200 : requestedConfig.ReadIntervalMs) : appliedConfig.ReadIntervalMs,
+                            SerialNumber = detection.SerialNumber,
+                            PortNo = detection.PortNo,
                             Tid = detection.Tid,
                             RssiDbm = detection.RssiDbm,
                             ReadAtUtc = detection.DetectedAtUtc
@@ -331,8 +347,6 @@ namespace NSPGatekeeper.Controller.Services
                 return;
             }
 
-            var handler = DetectionObserved;
-            if (handler != null) handler(detection);
         }
 
         private void OnStatus(ReaderStatus status)
@@ -341,20 +355,17 @@ namespace NSPGatekeeper.Controller.Services
             lock (_gate)
             {
                 RuntimeHandle handle;
-                var serial = (status.SerialNumber ?? status.DeviceCode ?? string.Empty).Trim().ToUpperInvariant();
+                var serial = (status.SerialNumber ?? string.Empty).Trim().ToUpperInvariant();
                 if (_runtimes.TryGetValue(serial, out handle))
                 {
-                    status.DeviceCode = serial;
                     status.SerialNumber = serial;
                     status.PowerDbm = handle.Config.PowerDbm;
                     status.ReadIntervalMs = handle.Config.ReadIntervalMs;
-                    status.Antennas = handle.Config.AntennaNumbers();
+                    status.Ports = handle.Config.PortNumbers();
                 }
             }
             try { _store.UpsertReaderStatus(status); }
             catch (Exception ex) { if (_logger != null) _logger.Error("reader-status", "Could not persist reader status", ex); }
-            var handlerStatus = StatusObserved;
-            if (handlerStatus != null) handlerStatus(status);
         }
 
         private string BuildEventUid(string prefix)
@@ -363,12 +374,12 @@ namespace NSPGatekeeper.Controller.Services
             return controller + "-" + prefix + "-" + Guid.NewGuid().ToString("N");
         }
 
-        private IList<ReaderDeviceConfig> BuildEffectiveConfigs(IList<ReaderDeviceConfig> baseConfigs, MeasurementSessionConfig measurement)
+        private IList<ReaderDeviceConfig> BuildEffectiveReaderConfigs(IList<ReaderDeviceConfig> baseConfigs, LaneCalibrationSessionConfig laneCalibration)
         {
             baseConfigs = baseConfigs ?? new List<ReaderDeviceConfig>();
-            if (measurement == null || !measurement.IsRunningDesired) return baseConfigs;
+            if (laneCalibration == null || !laneCalibration.IsRunningDesired) return baseConfigs;
 
-            var selectedReaders = (measurement.Readers ?? new List<MeasurementReaderConfig>())
+            var selectedReaders = (laneCalibration.Readers ?? new List<LaneCalibrationReaderConfig>())
                 .Where(reader => reader != null && !string.IsNullOrWhiteSpace(reader.SerialNumber))
                 .ToDictionary(
                     reader => reader.SerialNumber.Trim().ToUpperInvariant(),
@@ -379,22 +390,25 @@ namespace NSPGatekeeper.Controller.Services
             {
                 if (config == null) return config;
                 var serial = (config.SerialNumber ?? string.Empty).Trim().ToUpperInvariant();
-                MeasurementReaderConfig measurementReader;
-                if (!selectedReaders.TryGetValue(serial, out measurementReader)) return config;
+                LaneCalibrationReaderConfig calibrationReader;
+                if (!selectedReaders.TryGetValue(serial, out calibrationReader)) return config;
 
-                var selectedAntennas = new HashSet<int>(
-                    measurementReader.Antennas ?? new List<int>());
+                var selectedPorts = new HashSet<int>(
+                    calibrationReader.Ports ?? new List<int>());
                 var clone = CloneReaderConfig(config);
-                clone.PowerDbm = Math.Max(0, Math.Min(40, measurementReader.PowerDbm));
-                clone.ReadIntervalMs = Math.Max(1, Math.Min(60000, measurementReader.ReadIntervalMs));
-                foreach (var antenna in clone.Antennas ?? new List<ReaderAntennaConfig>())
-                    antenna.Enabled = selectedAntennas.Contains(antenna.AntennaId);
+                clone.PowerDbm = NormalizePower(clone.DriverKey, calibrationReader.PowerDbm);
+                clone.ReadIntervalMs = Math.Max(1, Math.Min(60000, calibrationReader.ReadIntervalMs));
+                clone.Ports = (clone.Ports ?? new List<int>())
+                    .Where(selectedPorts.Contains)
+                    .Distinct()
+                    .OrderBy(value => value)
+                    .ToList();
                 clone.ConfigHash = (config.ConfigHash ?? string.Empty)
-                                   + "|MEAS|" + measurement.MeasurementCode
-                                   + "|R" + measurement.Revision
+                                   + "|CAL|" + laneCalibration.LaneCalibrationCode
+                                   + "|R" + laneCalibration.Revision
                                    + "|P" + clone.PowerDbm
                                    + "|I" + clone.ReadIntervalMs
-                                   + "|A" + string.Join(",", clone.AntennaNumbers());
+                                   + "|PORTS=" + string.Join(",", clone.PortNumbers());
                 return clone;
             }).Where(x => x != null).ToList();
         }
@@ -403,27 +417,21 @@ namespace NSPGatekeeper.Controller.Services
         {
             var clone = new ReaderDeviceConfig
             {
-                DeviceCode = source.DeviceCode,
                 DriverKey = source.DriverKey,
-                DeviceName = source.DeviceName,
                 SerialNumber = source.SerialNumber,
-                Model = source.Model,
                 Endpoint = source.Endpoint,
                 Port = source.Port,
                 Enabled = source.Enabled,
-                ConfigRevision = source.ConfigRevision,
                 ConfigHash = source.ConfigHash,
                 PowerDbm = source.PowerDbm,
                 ReadIntervalMs = source.ReadIntervalMs,
                 TidStartAddress = source.TidStartAddress,
                 TidLength = source.TidLength,
-                Antennas = (source.Antennas ?? new List<ReaderAntennaConfig>())
-                    .Where(x => x != null)
-                    .Select(x => new ReaderAntennaConfig
-                    {
-                        AntennaId = x.AntennaId,
-                        Enabled = x.Enabled
-                    }).ToList(),
+                Ports = (source.Ports ?? new List<int>())
+                    .Where(value => value >= 1 && value <= 16)
+                    .Distinct()
+                    .OrderBy(value => value)
+                    .ToList(),
                 Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             };
             if (source.Options != null)
@@ -433,9 +441,19 @@ namespace NSPGatekeeper.Controller.Services
             return clone;
         }
 
-        private static string PairKey(string serial, int antennaNo)
+        private static string ReaderPortKey(string serial, int portNo)
         {
-            return (serial ?? string.Empty).Trim().ToUpperInvariant() + "|" + antennaNo;
+            return (serial ?? string.Empty).Trim().ToUpperInvariant() + "|" + portNo;
+        }
+
+        private static int MaximumPower(string driverKey)
+        {
+            return string.Equals(driverKey, "cf-e718", StringComparison.OrdinalIgnoreCase) ? 33 : 40;
+        }
+
+        private static int NormalizePower(string driverKey, int value)
+        {
+            return Math.Max(0, Math.Min(MaximumPower(driverKey), value));
         }
 
         private static bool NeedsRestart(ReaderDeviceConfig current, ReaderDeviceConfig next)
@@ -448,14 +466,14 @@ namespace NSPGatekeeper.Controller.Services
             return false;
         }
 
-        private bool ClearMeasurementLocked(string reason)
+        private bool ClearLaneCalibrationLocked(string reason)
         {
-            if (_measurement == null) return false;
-            var code = _measurement.MeasurementCode;
-            _measurement = null;
-            _measurementReaders.Clear();
-            _measurementPairs.Clear();
-            if (_logger != null) _logger.Info("measurement", "Measurement mode cleared; Parking mode restored", "code=" + code + "; reason=" + (reason ?? "stopped"));
+            if (_laneCalibration == null) return false;
+            var code = _laneCalibration.LaneCalibrationCode;
+            _laneCalibration = null;
+            _laneCalibrationReaders.Clear();
+            _laneCalibrationReaderPorts.Clear();
+            if (_logger != null) _logger.Info("lane-calibration", "Lane Calibration cleared; Parking mode restored", "code=" + code + "; reason=" + (reason ?? "stopped"));
             return true;
         }
 
@@ -471,6 +489,19 @@ namespace NSPGatekeeper.Controller.Services
                 handle.Runtime.Dispose();
             }
             catch { }
+            OnStatus(new ReaderStatus
+            {
+                DriverKey = handle.Config.DriverKey,
+                SerialNumber = serial,
+                Model = handle.Config.DriverKey,
+                Endpoint = handle.Config.Endpoint,
+                Online = false,
+                Message = "stopped",
+                PowerDbm = handle.Config.PowerDbm,
+                ReadIntervalMs = handle.Config.ReadIntervalMs,
+                Ports = handle.Config.PortNumbers(),
+                UpdatedAtUtc = DateTime.UtcNow
+            });
             if (_logger != null) _logger.Info("reader-manager", "Reader runtime stopped", "serial=" + serial);
         }
 
@@ -486,7 +517,7 @@ namespace NSPGatekeeper.Controller.Services
             lock (_gate)
             {
                 foreach (var serial in _runtimes.Keys.ToList()) StopRuntime(serial);
-                ClearMeasurementLocked("controller_stopped");
+                ClearLaneCalibrationLocked("controller_stopped");
             }
         }
 

@@ -1,57 +1,10 @@
-# Controller <-> Edge API Contract
+# Controller ↔ Edge API contract
 
-This contract follows the current NSP Gatekeeper architecture and the current Odoo source.
-The Controller sends physical/device facts only. Parking business decisions remain on Edge.
+All routes are `POST /v1/<route>` and require Core API authentication.
 
-## Core API routing
+## Heartbeat
 
-Public Core API routes are exposed directly as `/v1/...`.
-There is no public `service_code`, `server_code` or `gateway_base` URL prefix.
-
-## 1. Authenticate
-
-`POST /auth/token`
-
-Request contains exactly:
-
-```json
-{
-  "client_id": "...",
-  "client_secret": "..."
-}
-```
-
-Response:
-
-```json
-{
-  "status": "success",
-  "message": "OK",
-  "data": {
-    "access_token": "...",
-    "refresh_token": "...",
-    "token_type": "Bearer",
-    "expires_in": 86400,
-    "refresh_expires_in": 2592000
-  }
-}
-```
-
-Refresh is a different route:
-
-`POST /auth/refresh`
-
-```json
-{
-  "refresh_token": "..."
-}
-```
-
-Refresh tokens rotate. The Controller must save the newly returned pair in memory and must not reuse the old refresh token.
-
-## 2. Heartbeat
-
-`POST /v1/heartbeat`
+Route: `heartbeat`
 
 ```json
 {
@@ -59,9 +12,11 @@ Refresh tokens rotate. The Controller must save the newly returned pair in memor
 }
 ```
 
-## 3. Pull Reader/Antenna configuration
+## Pull Reader configuration
 
-`POST /v1/controller/device-config/pull`
+Route: `controller/device-config/pull`
+
+Request:
 
 ```json
 {
@@ -69,45 +24,44 @@ Refresh tokens rotate. The Controller must save the newly returned pair in memor
 }
 ```
 
-Current Edge payload uses `serial_number` as Reader identity and returns server-managed technical settings:
+Relevant response data:
 
 ```json
 {
-  "serial_number": "241130001",
-  "reader_parameters": {
-    "power_dbm": 30,
-    "read_interval_ms": 200,
-    "tid_start_address": 2,
-    "tid_length": 4
-  },
-  "antennas": [
+  "devices": [
     {
-      "antenna_no": 1
+      "serial_number": "RDR-SN-001",
+      "reader_parameters": {
+        "power_dbm": 30,
+        "read_interval_ms": 200,
+        "tid_start_address": 2,
+        "tid_length": 4
+      },
+      "ports": [
+        {"port_no": 1},
+        {"port_no": 2}
+      ]
     }
   ]
 }
 ```
 
-Antenna configuration contains only the physical `antenna_no`. RSSI remains telemetry/Measurement data and is not used as an operational validity threshold.
+The Edge payload does not contain physical IP/COM configuration. Driver, endpoint, TCP/COM port and vendor options are Controller-local settings keyed by Reader serial number.
 
-`device_code` is not a Controller runtime identity and is not sent back to Edge.
+## Report Reader status
 
-Physical endpoint/driver information is Controller-local when the current Edge payload does not provide it. The built-in CF-E718 driver can use SDK Auto COM discovery when endpoint is empty; Ethernet endpoints can be set in the Readers tab and are preserved across server config pulls.
-
-## 4. Reader health report
-
-`POST /v1/devices/report`
+Route: `devices/report`
 
 ```json
 {
   "controller_code": "CTRL-01",
   "devices": [
     {
-      "serial_number": "241130001",
-      "antennas": [1, 2],
+      "serial_number": "RDR-SN-001",
+      "ports": [1, 2],
       "device_status": "online",
-      "last_seen_at": "2026-07-27T04:00:00Z",
-      "firmware_version": "",
+      "last_seen_at": "2026-08-04T07:30:00Z",
+      "firmware_version": "1.0.0",
       "power_dbm": 30,
       "read_interval_ms": 200
     }
@@ -115,131 +69,106 @@ Physical endpoint/driver information is Controller-local when the current Edge p
 }
 ```
 
-Allowed status values are `online`, `offline`, `degraded`.
-The Controller does not send `message`, `device_code`, model, endpoint or parking topology in this runtime report.
+## Push raw Parking detections
 
-## 5. Parking detections
+Route: `parking/detections/push`
 
-`POST /v1/parking/detections/push`
+Maximum batch: 1000.
 
 ```json
 {
   "controller_code": "CTRL-01",
   "detections": [
     {
-      "event_uid": "CTRL01-RFID-000001",
-      "serial_number": "241130001",
-      "antenna_no": 1,
-      "detected_at": "2026-07-27T04:00:01.123Z",
-      "tid": "20006023044D649E"
+      "event_uid": "CTRL-01-RFID-...",
+      "serial_number": "RDR-SN-001",
+      "port_no": 1,
+      "detected_at": "2026-08-04T07:30:00.125Z",
+      "tid": "E280689400001111"
     }
   ]
 }
 ```
 
-Parking detection contains exactly physical facts. It does not send:
+The Controller sends raw technical observations only. Edge resolves TID through its runtime assignment projection and performs Parking classification.
 
-- `direction`
-- `event_type`
-- `vehicle_id`
-- `user_id`
-- `parking_area_code`
-- `lane_code`
-- `decision`
-- `rssi_dbm`
+## Pull Lane Calibration
 
-A request may contain up to 1000 detections. Unknown TIDs are terminally ignored by Edge and acknowledged with HTTP 200 success so Controller does not retry them.
+The current Edge route names retain `measurement` for API compatibility. Controller domain and UI use the term Lane Calibration.
 
-## 6. Measurement
-
-### Pull
-
-`POST /v1/controller/measurement/pull`
+Route: `controller/measurement/pull`
 
 ```json
 {
   "controller_code": "CTRL-01",
-  "current_measurement_code": ""
+  "current_measurement_code": "CAL-0001"
 }
 ```
 
-Response configuration contains only the Reader runtime subset owned by this Controller. RFID target lists remain on Cloud/Edge:
+Relevant response data:
 
 ```json
 {
-  "measurement_available": true,
-  "measurement_code": "MSR-...",
-  "revision": 3,
-  "desired_state": "running",
-  "readers": [
-    {"serial_number": "241130001", "power_dbm": 22, "read_interval_ms": 150, "antennas": [1, 3]},
-    {"serial_number": "241130002", "power_dbm": 18, "read_interval_ms": 200, "antennas": [1, 2]}
-  ]
+  "data": {
+    "measurement_available": true,
+    "measurement_code": "CAL-0001",
+    "status": "ready",
+    "desired_state": "running",
+    "revision": 2,
+    "readers": [
+      {
+        "serial_number": "RDR-SN-001",
+        "power_dbm": 28,
+        "read_interval_ms": 100,
+        "ports": [1, 2]
+      }
+    ]
+  }
 }
 ```
 
-### Events
+Selected Reader configurations temporarily override operational power, interval and active Port set. Readers participating in Lane Calibration are isolated from Parking delivery until the session stops.
 
-`POST /v1/controller/measurement/events`
+## Push Lane Calibration events
+
+Route: `controller/measurement/events`
+
+Maximum batch: 100.
 
 ```json
 {
   "controller_code": "CTRL-01",
-  "measurement_code": "MSR-...",
+  "measurement_code": "CAL-0001",
   "events": [
     {
-      "event_uid": "CTRL01-MEAS-...",
-      "revision": 3,
-      "power_dbm": 22,
-      "read_interval_ms": 150,
-      "serial_number": "241130001",
-      "antenna_no": 1,
-      "tid": "20006023044D649E",
-      "read_at": "2026-07-27T04:01:00.125Z",
-      "rssi_dbm": -41.5
+      "event_uid": "CTRL-01-CAL-...",
+      "revision": 2,
+      "power_dbm": 28,
+      "read_interval_ms": 100,
+      "serial_number": "RDR-SN-001",
+      "port_no": 1,
+      "tid": "E280689400001111",
+      "read_at": "2026-08-04T07:31:00.125Z",
+      "rssi_dbm": -48.5
     }
   ]
 }
 ```
 
-Maximum: 100 events/request. Controller persists `revision`, temporary Reader `power_dbm`, and `read_interval_ms` with every observation so pending data from an earlier Measure Again revision can never be misclassified as the current revision. Every TID detected on a selected Measurement Reader/Antenna is queued. Edge matches the configured RFID target list and ignores non-target reads.
+The event stores the actual runtime power and interval applied by the Controller. Item results `processed`, `duplicate`, and `ignored` are final delivery states. `rejected` is moved to the local dead state.
 
-### Status
+## Report Lane Calibration status
 
-`POST /v1/controller/measurement/status`
+Route: `controller/measurement/status`
 
 ```json
 {
   "controller_code": "CTRL-01",
-  "measurement_code": "MSR-...",
+  "measurement_code": "CAL-0001",
   "status": "running",
-  "occurred_at": "2026-07-27T04:01:00Z",
-  "message": "Controller started Measurement mode"
+  "occurred_at": "2026-08-04T07:31:00Z",
+  "message": "Controller started Lane Calibration"
 }
 ```
 
-A `ready` Measurement Session with a future `planned_start_at` remains in Parking mode until that time. Every Reader assigned to an active Measurement Session is isolated from Parking delivery while that session is active. Each Reader uses temporary Reader Power and Read Interval; only the `antennas` selected for that Reader participate. Readers outside the session continue Parking operation. If `planned_end_at` is reached while the session remains `ready`/`running`, the Controller reports `completed` and restores Parking mode.
-
-## Zeroconf fallback
-
-Zeroconf is used only when the saved Server URL fails at network/transport level. HTTP credential, permission or contract errors do not trigger discovery.
-
-The DNS-SD service `_nsp._tcp.local` advertises the Discovery Service SRV port, normally `9000`. Controller uses only these TXT properties:
-
-```text
-port=8069
-auth_path=/auth/token
-```
-
-Flow:
-
-```text
-_nsp._tcp.local
-    -> discovered IP + SRV service port 9000
-    -> TXT port=8069, auth_path=/auth/token
-    -> Core API base URL http://<IP>:8069
-    -> POST /auth/token
-    -> save URL only after authentication succeeds
-```
-
-No other Zeroconf metadata is required.
+Allowed status values are controlled by Edge. Controller currently reports `running` after applying a `ready` configuration.

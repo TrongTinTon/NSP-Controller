@@ -8,19 +8,15 @@ using NSPGatekeeper.Controller.Infrastructure.Logging;
 
 namespace NSPGatekeeper.Controller.Services
 {
-    /// <summary>
-    /// Keeps Reader SDK callbacks free of database/network I/O.
-    /// Parking and Measurement events are persisted in independent durable outboxes.
-    /// </summary>
     public sealed class DetectionOutboxWriter : IDisposable
     {
         private readonly LocalStore _store;
         private readonly FileLogger _logger;
         private readonly BlockingCollection<RfidDetection> _parkingQueue = new BlockingCollection<RfidDetection>(20000);
-        private readonly BlockingCollection<MeasurementEvent> _measurementQueue = new BlockingCollection<MeasurementEvent>(10000);
+        private readonly BlockingCollection<LaneCalibrationEvent> _laneCalibrationQueue = new BlockingCollection<LaneCalibrationEvent>(10000);
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly Thread _parkingThread;
-        private readonly Thread _measurementThread;
+        private readonly Thread _laneCalibrationThread;
         private bool _disposed;
 
         public DetectionOutboxWriter(LocalStore store, FileLogger logger)
@@ -28,9 +24,9 @@ namespace NSPGatekeeper.Controller.Services
             _store = store ?? throw new ArgumentNullException("store");
             _logger = logger;
             _parkingThread = new Thread(RunParking) { IsBackground = true, Name = "Parking outbox writer" };
-            _measurementThread = new Thread(RunMeasurement) { IsBackground = true, Name = "Measurement outbox writer" };
+            _laneCalibrationThread = new Thread(RunLaneCalibration) { IsBackground = true, Name = "Lane Calibration outbox writer" };
             _parkingThread.Start();
-            _measurementThread.Start();
+            _laneCalibrationThread.Start();
         }
 
         public void EnqueueParking(RfidDetection detection)
@@ -38,17 +34,17 @@ namespace NSPGatekeeper.Controller.Services
             if (detection == null || _disposed) return;
             if (_parkingQueue.TryAdd(detection)) return;
 
-            if (_logger != null) _logger.Warn("parking-outbox", "Ingest queue full; using synchronous persistence", "serial=" + detection.DeviceSerial);
+            if (_logger != null) _logger.Warn("parking-outbox", "Ingest queue full; using synchronous persistence", "serial=" + detection.SerialNumber);
             _store.EnqueueDetections(new List<RfidDetection> { detection });
         }
 
-        public void EnqueueMeasurement(MeasurementEvent evt)
+        public void EnqueueLaneCalibration(LaneCalibrationEvent evt)
         {
             if (evt == null || _disposed) return;
-            if (_measurementQueue.TryAdd(evt)) return;
+            if (_laneCalibrationQueue.TryAdd(evt)) return;
 
-            if (_logger != null) _logger.Warn("measurement-outbox", "Ingest queue full; using synchronous persistence", "serial=" + evt.SerialNumber);
-            _store.EnqueueMeasurementEvents(new List<MeasurementEvent> { evt });
+            if (_logger != null) _logger.Warn("lane-calibration-outbox", "Ingest queue full; using synchronous persistence", "serial=" + evt.SerialNumber);
+            _store.EnqueueLaneCalibrationEvents(new List<LaneCalibrationEvent> { evt });
         }
 
         private void RunParking()
@@ -77,27 +73,27 @@ namespace NSPGatekeeper.Controller.Services
             }
         }
 
-        private void RunMeasurement()
+        private void RunLaneCalibration()
         {
-            var batch = new List<MeasurementEvent>(100);
+            var batch = new List<LaneCalibrationEvent>(100);
             while (!_cts.IsCancellationRequested)
             {
                 try
                 {
-                    MeasurementEvent first;
-                    if (!_measurementQueue.TryTake(out first, 100))
+                    LaneCalibrationEvent first;
+                    if (!_laneCalibrationQueue.TryTake(out first, 100))
                     {
-                        if (_measurementQueue.IsCompleted) break;
+                        if (_laneCalibrationQueue.IsCompleted) break;
                         continue;
                     }
                     batch.Add(first);
-                    while (batch.Count < 100 && _measurementQueue.TryTake(out first)) batch.Add(first);
-                    PersistMeasurementWithRetry(batch);
+                    while (batch.Count < 100 && _laneCalibrationQueue.TryTake(out first)) batch.Add(first);
+                    PersistLaneCalibrationWithRetry(batch);
                     batch.Clear();
                 }
                 catch (Exception ex)
                 {
-                    if (_logger != null) _logger.Error("measurement-outbox", "Outbox writer failed", ex);
+                    if (_logger != null) _logger.Error("lane-calibration-outbox", "Outbox writer failed", ex);
                     Thread.Sleep(500);
                 }
             }
@@ -125,23 +121,23 @@ namespace NSPGatekeeper.Controller.Services
             }
         }
 
-        private void PersistMeasurementWithRetry(IList<MeasurementEvent> batch)
+        private void PersistLaneCalibrationWithRetry(IList<LaneCalibrationEvent> batch)
         {
             while (batch.Count > 0)
             {
                 try
                 {
-                    _store.EnqueueMeasurementEvents(batch);
+                    _store.EnqueueLaneCalibrationEvents(batch);
                     return;
                 }
                 catch (Exception ex)
                 {
                     if (_cts.IsCancellationRequested)
                     {
-                        if (_logger != null) _logger.Error("measurement-outbox", "Could not flush batch during shutdown", ex);
+                        if (_logger != null) _logger.Error("lane-calibration-outbox", "Could not flush batch during shutdown", ex);
                         return;
                     }
-                    if (_logger != null) _logger.Warn("measurement-outbox", "Local database unavailable; retrying", ex.Message);
+                    if (_logger != null) _logger.Warn("lane-calibration-outbox", "Local database unavailable; retrying", ex.Message);
                     Thread.Sleep(1000);
                 }
             }
@@ -152,14 +148,14 @@ namespace NSPGatekeeper.Controller.Services
             if (_disposed) return;
             _disposed = true;
             _parkingQueue.CompleteAdding();
-            _measurementQueue.CompleteAdding();
+            _laneCalibrationQueue.CompleteAdding();
             try { _parkingThread.Join(3000); } catch { }
-            try { _measurementThread.Join(3000); } catch { }
+            try { _laneCalibrationThread.Join(3000); } catch { }
             try { _cts.Cancel(); } catch { }
             try { _parkingThread.Join(1000); } catch { }
-            try { _measurementThread.Join(1000); } catch { }
+            try { _laneCalibrationThread.Join(1000); } catch { }
             _parkingQueue.Dispose();
-            _measurementQueue.Dispose();
+            _laneCalibrationQueue.Dispose();
             _cts.Dispose();
         }
     }

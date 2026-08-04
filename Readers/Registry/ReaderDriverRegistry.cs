@@ -24,10 +24,5 @@ namespace NSPGatekeeper.Controller.Readers
                 throw new InvalidOperationException("Reader driver is not registered: " + (config.DriverKey ?? "<empty>"));
             return factory.Create(config);
         }
-
-        public IList<IReaderDriverFactory> List()
-        {
-            return new List<IReaderDriverFactory>(_factories.Values);
-        }
     }
 }

@@ -6,23 +6,24 @@ namespace NSPGatekeeper.Controller.Configuration
     public sealed class AppSettings
     {
         public string ControllerCode { get; set; }
-        public string ControllerName { get; set; }
         public string CoreApiBaseUrl { get; set; }
         public string CoreApiClientId { get; set; }
         public string CoreApiClientSecret { get; set; }
         public string CoreApiDatabase { get; set; }
         public int CoreApiTimeoutSec { get; set; }
+        public int CoreApiRateLimitBackoffSec { get; set; }
         public bool DiscoveryEnabled { get; set; }
         public string DiscoveryServiceType { get; set; }
         public int DiscoveryTimeoutMs { get; set; }
         public int HeartbeatIntervalSec { get; set; }
-        public int DeviceConfigIntervalSec { get; set; }
-        public int DeviceStatusIntervalSec { get; set; }
+        public int ReaderConfigIntervalSec { get; set; }
+        public int ReaderStatusIntervalSec { get; set; }
         public int DetectionPushIntervalMs { get; set; }
         public int DetectionBatchSize { get; set; }
-        public int MeasurementPollIntervalSec { get; set; }
-        public int MeasurementPushIntervalMs { get; set; }
-        public int MeasurementBatchSize { get; set; }
+        public int LaneCalibrationIdlePollIntervalSec { get; set; }
+        public int LaneCalibrationActivePollIntervalSec { get; set; }
+        public int LaneCalibrationPushIntervalMs { get; set; }
+        public int LaneCalibrationBatchSize { get; set; }
         public int CleanupIntervalSec { get; set; }
         public int SentDetectionRetentionDays { get; set; }
         public string PostgreSqlConnectionString { get; set; }
@@ -33,28 +34,29 @@ namespace NSPGatekeeper.Controller.Configuration
         {
             return new AppSettings
             {
-                ControllerCode = Read("ControllerCode", string.Empty),
-                ControllerName = Read("ControllerName", Environment.MachineName),
-                CoreApiBaseUrl = NormalizeBaseUrl(Read("CoreApiBaseUrl", string.Empty)),
-                CoreApiClientId = Read("CoreApiClientId", string.Empty),
-                CoreApiClientSecret = Read("CoreApiClientSecret", string.Empty),
-                CoreApiDatabase = Read("CoreApiDatabase", string.Empty),
+                ControllerCode = ReadOverride("NSP_CONTROLLER_CODE", "ControllerCode", string.Empty),
+                CoreApiBaseUrl = NormalizeBaseUrl(ReadOverride("NSP_CORE_API_BASE_URL", "CoreApiBaseUrl", string.Empty)),
+                CoreApiClientId = ReadOverride("NSP_CORE_API_CLIENT_ID", "CoreApiClientId", string.Empty),
+                CoreApiClientSecret = ReadOverride("NSP_CORE_API_CLIENT_SECRET", "CoreApiClientSecret", string.Empty),
+                CoreApiDatabase = ReadOverride("NSP_CORE_API_DATABASE", "CoreApiDatabase", string.Empty),
                 CoreApiTimeoutSec = ReadInt("CoreApiTimeoutSec", 15, 3, 120),
+                CoreApiRateLimitBackoffSec = ReadInt("CoreApiRateLimitBackoffSec", 60, 5, 300),
                 DiscoveryEnabled = ReadBool("DiscoveryEnabled", true),
                 DiscoveryServiceType = Read("DiscoveryServiceType", "_nsp._tcp.local"),
                 DiscoveryTimeoutMs = ReadInt("DiscoveryTimeoutMs", 5000, 1000, 30000),
                 HeartbeatIntervalSec = ReadInt("HeartbeatIntervalSec", 30, 5, 3600),
-                DeviceConfigIntervalSec = ReadInt("DeviceConfigIntervalSec", 20, 5, 3600),
-                DeviceStatusIntervalSec = ReadInt("DeviceStatusIntervalSec", 30, 5, 3600),
-                DetectionPushIntervalMs = ReadInt("DetectionPushIntervalMs", 200, 50, 60000),
-                DetectionBatchSize = ReadInt("DetectionBatchSize", 250, 1, 1000),
-                MeasurementPollIntervalSec = ReadInt("MeasurementPollIntervalSec", 2, 1, 60),
-                MeasurementPushIntervalMs = ReadInt("MeasurementPushIntervalMs", 200, 50, 60000),
-                MeasurementBatchSize = ReadInt("MeasurementBatchSize", 100, 1, 100),
+                ReaderConfigIntervalSec = ReadInt("ReaderConfigIntervalSec", 60, 5, 3600),
+                ReaderStatusIntervalSec = ReadInt("ReaderStatusIntervalSec", 60, 5, 3600),
+                DetectionPushIntervalMs = ReadInt("DetectionPushIntervalMs", 1000, 100, 60000),
+                DetectionBatchSize = ReadInt("DetectionBatchSize", 1000, 1, 1000),
+                LaneCalibrationIdlePollIntervalSec = ReadInt("LaneCalibrationIdlePollIntervalSec", 5, 2, 300),
+                LaneCalibrationActivePollIntervalSec = ReadInt("LaneCalibrationActivePollIntervalSec", 3, 1, 60),
+                LaneCalibrationPushIntervalMs = ReadInt("LaneCalibrationPushIntervalMs", 1000, 100, 60000),
+                LaneCalibrationBatchSize = ReadInt("LaneCalibrationBatchSize", 100, 1, 100),
                 CleanupIntervalSec = ReadInt("CleanupIntervalSec", 3600, 60, 86400),
                 SentDetectionRetentionDays = ReadInt("SentDetectionRetentionDays", 7, 1, 365),
-                PostgreSqlConnectionString = Read("PostgreSqlConnectionString", string.Empty),
-                PostgreSqlAdminConnectionString = Read("PostgreSqlAdminConnectionString", string.Empty),
+                PostgreSqlConnectionString = ReadOverride("NSP_POSTGRES_CONNECTION", "PostgreSqlConnectionString", string.Empty),
+                PostgreSqlAdminConnectionString = ReadOverride("NSP_POSTGRES_ADMIN_CONNECTION", "PostgreSqlAdminConnectionString", string.Empty),
                 LogDirectory = Read("LogDirectory", "logs")
             };
         }
@@ -62,7 +64,6 @@ namespace NSPGatekeeper.Controller.Configuration
         public void SaveConnection()
         {
             Write("ControllerCode", ControllerCode);
-            Write("ControllerName", ControllerName);
             Write("CoreApiBaseUrl", CoreApiBaseUrl);
             Write("CoreApiClientId", CoreApiClientId);
             Write("CoreApiClientSecret", CoreApiClientSecret);
@@ -88,6 +89,14 @@ namespace NSPGatekeeper.Controller.Configuration
                 (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
                 throw new InvalidOperationException("Core API Server URL is invalid: " + value);
             return value;
+        }
+
+        private static string ReadOverride(string environmentKey, string settingKey, string fallback)
+        {
+            var environmentValue = Environment.GetEnvironmentVariable(environmentKey);
+            return string.IsNullOrWhiteSpace(environmentValue)
+                ? Read(settingKey, fallback)
+                : environmentValue.Trim();
         }
 
         private static string Read(string key, string fallback)

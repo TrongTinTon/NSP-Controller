@@ -1,51 +1,26 @@
-# NSP Controller Local PostgreSQL Bootstrap
+# Local PostgreSQL bootstrap
 
-## Runtime sequence
+Controller requires `PostgreSqlConnectionString`. The optional `PostgreSqlAdminConnectionString` is used only on first start to create the application role/database when needed.
 
-`Controller start -> EnsureDatabase -> EnsureSchema -> Controller runtime`
+Recommended deployment:
 
-- `EnsureDatabase` is implemented by `Infrastructure/Database/DatabaseBootstrapper.cs`.
-- `EnsureSchema` remains in `Infrastructure/Database/LocalStore.cs`.
+1. Create a dedicated PostgreSQL role and database.
+2. Grant the application role ownership or required schema privileges.
+3. Supply connection strings through environment variables or deployment-specific configuration.
+4. Start Controller; `LocalStore.EnsureSchema()` applies `database/init_database.sql`.
 
-### Existing database
+Environment variables:
 
-If `PostgreSqlConnectionString` can open the configured database, no admin credential is used and no role/database DDL is executed.
-
-### Fresh database
-
-If the application connection cannot be opened, the Controller connects to maintenance database `postgres` using `PostgreSqlAdminConnectionString`. It then:
-
-1. Creates the application login role only if it does not exist.
-2. Creates the application database only if it does not exist.
-3. Sets the new database owner to the application role.
-4. Grants CONNECT.
-5. Reconnects using the normal application connection string.
-6. Runs `database/init_database.sql` to create only technical tables/indexes.
-
-If `PostgreSqlAdminConnectionString` is blank, the Controller tries the application credentials against database `postgres`. This fallback works only when that role already exists and has enough PostgreSQL privileges.
-
-## Configuration
-
-```xml
-<add key="PostgreSqlConnectionString"
-     value="Host=127.0.0.1;Port=5432;Database=nsp_db;Username=parking_log_user;Password=...;Pooling=true" />
-
-<add key="PostgreSqlAdminConnectionString"
-     value="Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=...;Pooling=false" />
+```text
+NSP_POSTGRES_CONNECTION
+NSP_POSTGRES_ADMIN_CONNECTION
 ```
 
-The admin connection is used only when role/database bootstrap is needed. Do not commit production passwords into source control.
+The 1.4.0 schema is a clean Reader-Port schema. A local database created by an Antenna-based Controller version should be recreated or migrated explicitly before using this source.
 
-## Manual deployment reference
+Tables:
 
-`database/00_create_database.sql` provides the equivalent role/database bootstrap for administrators using `psql`. The Controller runtime does not execute this file and does not depend on `psql.exe`.
-
-## Optional admin connection string
-
-`PostgreSqlAdminConnectionString` may be left empty. Empty values, whitespace, `""`, and `''` are normalized as not configured. In that case the Controller derives a maintenance connection from `PostgreSqlConnectionString` and changes only `Database=postgres`. A dedicated PostgreSQL administrator connection is required only when the application role/database still need to be created and the application account does not have the required privileges.
-
-## Invalid optional admin connection value
-
-`PostgreSqlAdminConnectionString` is optional. From Controller 1.1.6, if an existing `.exe.config` contains an invalid or incomplete value, the Controller logs a warning and falls back to the validated `PostgreSqlConnectionString` with `Database=postgres`. An invalid optional admin value no longer stops startup by itself.
-
-If the application role/database do not yet exist and the fallback account cannot create them, configure a valid PostgreSQL administrator connection or provision the role/database during deployment.
+- `controller_reader`
+- `controller_reader_runtime_status`
+- `controller_parking_outbox`
+- `controller_lane_calibration_outbox`

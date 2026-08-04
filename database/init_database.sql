@@ -1,18 +1,15 @@
 CREATE TABLE IF NOT EXISTS controller_reader (
     serial_number       VARCHAR(128) PRIMARY KEY,
     driver_key          VARCHAR(64) NOT NULL,
-    device_name         VARCHAR(256),
-    model               VARCHAR(128),
     endpoint            VARCHAR(256),
     port                INTEGER NOT NULL DEFAULT 0,
     enabled             BOOLEAN NOT NULL DEFAULT TRUE,
-    config_revision     INTEGER NOT NULL DEFAULT 0,
     config_hash         VARCHAR(128),
     power_dbm           INTEGER NOT NULL DEFAULT 30,
     read_interval_ms    INTEGER NOT NULL DEFAULT 200,
     tid_start_address   INTEGER NOT NULL DEFAULT 2,
     tid_length          INTEGER NOT NULL DEFAULT 4,
-    antennas_json       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ports_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     options_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -27,23 +24,15 @@ CREATE TABLE IF NOT EXISTS controller_reader_runtime_status (
     firmware_version    VARCHAR(128),
     power_dbm           INTEGER NOT NULL DEFAULT 30,
     read_interval_ms    INTEGER NOT NULL DEFAULT 200,
-    antennas_json       JSONB NOT NULL DEFAULT '[]'::jsonb,
-    config_revision     INTEGER NOT NULL DEFAULT 0,
+    ports_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-ALTER TABLE controller_reader_runtime_status
-    ADD COLUMN IF NOT EXISTS power_dbm INTEGER NOT NULL DEFAULT 30;
-
-ALTER TABLE controller_reader_runtime_status
-    ADD COLUMN IF NOT EXISTS read_interval_ms INTEGER NOT NULL DEFAULT 200;
 
 CREATE TABLE IF NOT EXISTS controller_parking_outbox (
     id                  BIGSERIAL PRIMARY KEY,
     event_uid           VARCHAR(200) NOT NULL UNIQUE,
-    controller_code     VARCHAR(128) NOT NULL,
     serial_number       VARCHAR(128) NOT NULL,
-    antenna_no          INTEGER NOT NULL,
+    port_no             INTEGER NOT NULL CHECK (port_no BETWEEN 1 AND 16),
     tid                 VARCHAR(256) NOT NULL,
     detected_at         TIMESTAMPTZ NOT NULL,
     status              VARCHAR(16) NOT NULL DEFAULT 'pending',
@@ -57,15 +46,15 @@ CREATE TABLE IF NOT EXISTS controller_parking_outbox (
 CREATE INDEX IF NOT EXISTS ix_controller_parking_outbox_pending
     ON controller_parking_outbox(status, next_attempt_at, id);
 
-CREATE TABLE IF NOT EXISTS controller_measurement_outbox (
+CREATE TABLE IF NOT EXISTS controller_lane_calibration_outbox (
     id                  BIGSERIAL PRIMARY KEY,
     event_uid           VARCHAR(200) NOT NULL UNIQUE,
-    measurement_code    VARCHAR(128) NOT NULL,
+    lane_calibration_code    VARCHAR(128) NOT NULL,
     revision            INTEGER NOT NULL DEFAULT 1,
     power_dbm           INTEGER NOT NULL DEFAULT 30,
     read_interval_ms    INTEGER NOT NULL DEFAULT 200,
     serial_number       VARCHAR(128) NOT NULL,
-    antenna_no          INTEGER NOT NULL,
+    port_no             INTEGER NOT NULL CHECK (port_no BETWEEN 1 AND 16),
     tid                 VARCHAR(256) NOT NULL,
     rssi_dbm            DOUBLE PRECISION,
     read_at             TIMESTAMPTZ NOT NULL,
@@ -77,14 +66,5 @@ CREATE TABLE IF NOT EXISTS controller_measurement_outbox (
     sent_at             TIMESTAMPTZ
 );
 
-ALTER TABLE controller_measurement_outbox
-    ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1;
-
-ALTER TABLE controller_measurement_outbox
-    ADD COLUMN IF NOT EXISTS power_dbm INTEGER NOT NULL DEFAULT 30;
-
-ALTER TABLE controller_measurement_outbox
-    ADD COLUMN IF NOT EXISTS read_interval_ms INTEGER NOT NULL DEFAULT 200;
-
-CREATE INDEX IF NOT EXISTS ix_controller_measurement_outbox_pending
-    ON controller_measurement_outbox(status, next_attempt_at, id);
+CREATE INDEX IF NOT EXISTS ix_controller_lane_calibration_outbox_pending
+    ON controller_lane_calibration_outbox(status, next_attempt_at, id);

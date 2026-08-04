@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Reflection;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using NSPGatekeeper.Controller.Configuration;
 using NSPGatekeeper.Controller.Infrastructure.Database;
@@ -25,6 +27,17 @@ namespace NSPGatekeeper.Controller.Bootstrap
 
             var settings = AppSettings.Load();
             var logger = new FileLogger(Path.Combine(baseDirectory, settings.LogDirectory ?? "logs"));
+            RegisterUnhandledExceptionLogging(logger);
+
+            logger.Info(
+                "startup",
+                "NSP Controller starting",
+                "version=" + Assembly.GetExecutingAssembly().GetName().Version
+                + "; controller=" + (string.IsNullOrWhiteSpace(settings.ControllerCode) ? "<not-configured>" : settings.ControllerCode)
+                + "; base_dir=" + baseDirectory
+                + "; os=" + Environment.OSVersion
+                + "; process_arch=" + (Environment.Is64BitProcess ? "x64" : "x86")
+                + "; sdk=" + Cfe718Native.DescribeRuntime());
 
             try
             {
@@ -36,6 +49,7 @@ namespace NSPGatekeeper.Controller.Bootstrap
 
                 var store = new LocalStore(settings.PostgreSqlConnectionString, logger);
                 store.EnsureSchema();
+                store.ClearReaderRuntimeStatuses();
 
                 var registry = new ReaderDriverRegistry();
                 registry.Register(new Cfe718ReaderFactory(logger));
@@ -47,15 +61,43 @@ namespace NSPGatekeeper.Controller.Bootstrap
                     using (var runtime = new ControllerRuntime(settings, store, coreApi, readers, logger))
                     {
                         runtime.Start();
+                        logger.Info("startup", "Controller runtime started", "log_dir=" + logger.DirectoryPath);
                         Application.Run(new MainForm(settings, runtime, readers, store, logger));
                     }
                 }
             }
             catch (Exception ex)
             {
-                logger.Error("startup", "Controller startup failed", ex);
+                logger.Error("startup", "Controller startup failed", ex, "base_dir=" + baseDirectory);
                 MessageBox.Show(ex.Message, "NSP Gatekeeper Controller", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+            finally
+            {
+                logger.Info("startup", "NSP Controller stopped");
+            }
+        }
+
+        private static void RegisterUnhandledExceptionLogging(FileLogger logger)
+        {
+            Application.ThreadException += delegate(object sender, System.Threading.ThreadExceptionEventArgs args)
+            {
+                logger.Error("unhandled-ui", "Unhandled UI thread exception", args.Exception);
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs args)
+            {
+                logger.Error(
+                    "unhandled-appdomain",
+                    "Unhandled AppDomain exception",
+                    args.ExceptionObject as Exception,
+                    "terminating=" + args.IsTerminating);
+            };
+
+            TaskScheduler.UnobservedTaskException += delegate(object sender, UnobservedTaskExceptionEventArgs args)
+            {
+                logger.Error("unhandled-task", "Unobserved task exception", args.Exception);
+                args.SetObserved();
+            };
         }
     }
 }

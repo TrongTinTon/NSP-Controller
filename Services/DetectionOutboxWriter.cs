@@ -149,11 +149,28 @@ namespace NSPGatekeeper.Controller.Services
             _disposed = true;
             _parkingQueue.CompleteAdding();
             _laneCalibrationQueue.CompleteAdding();
-            try { _parkingThread.Join(3000); } catch { }
-            try { _laneCalibrationThread.Join(3000); } catch { }
-            try { _cts.Cancel(); } catch { }
-            try { _parkingThread.Join(1000); } catch { }
-            try { _laneCalibrationThread.Join(1000); } catch { }
+            try
+            {
+                if (!_parkingThread.Join(3000) && _logger != null)
+                    _logger.Warn("parking-outbox", "Parking outbox writer did not drain before timeout");
+                if (!_laneCalibrationThread.Join(3000) && _logger != null)
+                    _logger.Warn("lane-calibration-outbox", "Lane Calibration outbox writer did not drain before timeout");
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Error("outbox", "Outbox writer graceful shutdown failed", ex);
+            }
+
+            _cts.Cancel();
+            try
+            {
+                _parkingThread.Join(1000);
+                _laneCalibrationThread.Join(1000);
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Error("outbox", "Outbox writer forced shutdown failed", ex);
+            }
             _parkingQueue.Dispose();
             _laneCalibrationQueue.Dispose();
             _cts.Dispose();

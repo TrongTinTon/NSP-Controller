@@ -1,88 +1,108 @@
-# NSP Gatekeeper Controller 1.4.0
+# NSP Gatekeeper Controller 1.4.8
 
 Windows Controller for NSP Reader acquisition and execution.
 
 ## Responsibility
 
-The Controller is intentionally limited to technical acquisition and execution:
+Controller is limited to technical acquisition and execution:
 
 - authenticate to the Edge Core API;
-- send Controller heartbeat;
-- pull Reader runtime parameters;
-- combine Cloud/Edge technical parameters with Controller-local physical connection settings;
-- start and supervise Reader drivers;
-- report Reader status and configured Reader Ports;
-- durably queue and push raw Parking detections;
-- execute Lane Calibration and durably push raw calibration events/status.
+- send heartbeat;
+- pull Reader identity and technical runtime parameters;
+- bind SDK SerialNumber to the current local COM/IP connection;
+- connect, supervise and automatically reconnect Reader drivers;
+- report technical Reader status;
+- send every raw RFID detection with `serial_number`, `port_no`, TID, timestamp and RSSI when available;
+- execute Lane Calibration power/interval changes and send raw calibration events.
 
-The Controller does not manage RFID Tag Whitelist, User, Vehicle, runtime assignment, Parking Layout classification, Check-in/Check-out, access decisions, or Parking Transactions. Those responsibilities belong to Cloud and Edge business runtime.
+Controller does not manage RFID Tag Whitelist, User, Vehicle, runtime assignments, Parking Layout, valid Lane Ports, Check-in/Check-out or Parking Transactions. Cloud and Edge own those business decisions.
 
-## Runtime identity
-
-Every physical observation is addressed by:
+## Reader and Port ownership
 
 ```text
-Reader serial_number + port_no
+SDK SerialNumber = physical Reader identity
+COM/IP             = dynamic local Controller binding
+port_no            = raw technical observation from the Reader
+valid business Port = Server/Edge decision
 ```
 
-`antenna_code`, `antenna_no`, and Antenna mapping are not part of Controller APIs or local business models. Vendor SDK function names containing `Antenna` remain only inside the CF-E718 native adapter because those names are defined by the device manufacturer.
+Controller never disables a Reader because the Server `ports` list is empty. It does not filter detections by Server Port configuration. The CF-E718 driver inventories its hardware ports and forwards every raw detection. Edge accepts or ignores each `port_no` according to Parking Layout or Lane Calibration configuration.
 
-## Main flows
+The `ports` property may still appear in Server payloads for compatibility, but Controller intentionally ignores it when starting or restarting a Reader.
+
+## Runtime flow
 
 ```text
-Edge Reader config -> Controller local connection mapping -> Reader driver
-Reader callback -> Parking durable outbox -> Edge parking/detections/push
-Lane Calibration config -> temporary Reader/Port runtime -> calibration durable outbox -> Edge measurement/events
-Reader status -> Edge devices/report
-Controller heartbeat -> Edge heartbeat
+Edge Reader identity/parameters
+→ Controller connects Reader by SDK SerialNumber
+→ Reader inventories hardware ports
+→ Controller sends all raw detections
+→ Edge filters and processes configured ports
 ```
+
+During Lane Calibration:
+
+```text
+Edge selects Reader and temporary Power/Interval
+→ Controller restarts that Reader with temporary technical settings
+→ Controller sends raw events from every observed port_no
+→ Edge ignores ports outside the Calibration configuration
+```
+
+## Dynamic COM binding
+
+On every reconnect Controller tries the previous COM first, then enumerates current Windows COM ports. Each candidate is opened and verified with SDK `GetSeriaNo()`. When Windows changes the COM number, Controller updates `controller_reader.endpoint` locally after the SDK SerialNumber matches.
+
+## Readers UI
+
+The Readers tab is intentionally simple and read-only:
+
+- Serial Number;
+- actual COM/connection;
+- Online/Connecting/Stopped state;
+- latest technical detail/error;
+- last update time;
+- current Windows COM list.
+
+There is no manual Port configuration and no manual COM binding form. COM rebinding is automatic.
 
 ## Local persistence
 
-PostgreSQL stores only:
+PostgreSQL stores:
 
-- Reader technical configuration and local connection mapping;
+- Reader identity, technical parameters and local COM/IP binding;
 - current Reader runtime status;
-- pending/sent/dead Parking detections;
-- pending/sent/dead Lane Calibration events.
+- Parking raw-detection outbox;
+- Lane Calibration raw-event outbox.
 
-The schema is defined in `database/init_database.sql`. Version 1.4.0 is a clean Reader-Port schema and does not preserve the legacy Antenna-based local schema.
-
-## Configuration
-
-Use `App.config` or environment variables:
-
-- `NSP_CONTROLLER_CODE`
-- `NSP_CORE_API_BASE_URL`
-- `NSP_CORE_API_CLIENT_ID`
-- `NSP_CORE_API_CLIENT_SECRET`
-- `NSP_CORE_API_DATABASE`
-- `NSP_POSTGRES_CONNECTION`
-- `NSP_POSTGRES_ADMIN_CONNECTION`
-
-No database or API password is shipped in source.
+Reader business Port configuration is not stored in `controller_reader`.
 
 ## Build
 
-- Target: .NET Framework 4.8
-- Platforms: x86 and x64
-- UI: Windows Forms
-- Database: PostgreSQL through Npgsql
-- Included Reader driver: CF-E718 / UHFReader288
+- .NET Framework 4.8
+- Windows Forms
+- x86 and x64
+- PostgreSQL/Npgsql
+- CF-E718 / UHFReader288 SDK
 
-Build with Visual Studio/MSBuild on Windows. Native SDK files are copied according to the selected platform.
+Build and hardware integration tests must be run on Windows with the physical Reader.
 
-See:
+## Reader UI observation model
 
-- `docs/API_CONTRACT.md`
-- `docs/CONTROLLER_NSP_ALIGNMENT.md`
-- `docs/CONTROLLER_SOURCE_ANALYSIS_VI.md`
-- `docs/DATABASE_BOOTSTRAP.md`
+The Readers tab displays only physical devices observed through `GetSeriaNo()` during the current Controller process. The configured Server identity remains an internal runtime key and is not shown in this observation table. A detected SDK serial is persisted with the actual COM endpoint even when the Server identity does not match, allowing operators to see the real device connected to the machine.
 
+## Lane Calibration API acknowledgement
 
-## Reader COM visibility (1.4.1)
+Lane Calibration routes and payload fields use one consistent domain name:
 
-- The Readers tab enumerates Windows COM ports and exposes them in the Endpoint dropdown.
-- Reader rows come from Edge-synchronized Reader configuration, even before runtime status exists.
-- SDK Auto COM discovery reports the resolved port (for example `COM3`) in Reader status.
-- A physical COM port is not promoted to an NSP Reader by itself; Edge remains the source of Reader identity/configuration.
+```text
+controller/lane-calibrations/pull
+controller/lane-calibrations/events
+controller/lane-calibrations/status
+
+lane_calibration_code
+current_lane_calibration_code
+lane_calibration_available
+```
+
+The event endpoint is transport acknowledgement only. HTTP 200 means the complete raw-event batch was received and Controller marks it sent. Controller does not parse per-item business results. HTTP 500 or a transport failure leaves the batch pending for retry. Edge owns duplicate handling, port filtering, acceptance and business processing.

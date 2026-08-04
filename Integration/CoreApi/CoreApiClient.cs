@@ -20,6 +20,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
 {
     public sealed class CoreApiClient : IDisposable
     {
+        private const string LaneCalibrationPullRoute = "controller/lane-calibrations/pull";
+        private const string LaneCalibrationEventsRoute = "controller/lane-calibrations/events";
+        private const string LaneCalibrationStatusRoute = "controller/lane-calibrations/status";
         private readonly AppSettings _settings;
         private readonly FileLogger _logger;
         private readonly ZeroconfDiscoveryClient _discovery;
@@ -159,7 +162,10 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     if (_logger != null) _logger.Warn("device-config", "Ignored Reader config without serial_number", token.ToString(Formatting.None));
                     continue;
                 }
-                serial = serial.ToUpperInvariant();
+                serial = NormalizeSerial(serial);
+                if (!IsSdkSerial(serial))
+                    throw new InvalidOperationException(
+                        "Reader serial_number must be the 4-byte SDK SerialNumber encoded as 8 uppercase hexadecimal characters: " + serial);
                 if (!seenSerials.Add(serial))
                     throw new InvalidOperationException("Controller configuration contains duplicate Reader serial_number: " + serial);
 
@@ -171,21 +177,12 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     PowerDbm = Clamp(readerParameters.Value<int?>("power_dbm") ?? 30, 0, 40),
                     ReadIntervalMs = Clamp(readerParameters.Value<int?>("read_interval_ms") ?? 200, 1, 60000),
                     TidStartAddress = Math.Max(0, readerParameters.Value<int?>("tid_start_address") ?? 2),
-                    TidLength = Math.Max(1, readerParameters.Value<int?>("tid_length") ?? 4),
-                    ConfigHash = Sha256(token.ToString(Formatting.None))
+                    TidLength = Math.Max(1, readerParameters.Value<int?>("tid_length") ?? 4)
                 };
+                config.ConfigHash = ReaderRuntimeConfigHash(config);
 
-                var ports = token["ports"] as JArray;
-                if (ports != null)
-                {
-                    foreach (var item in ports.OfType<JObject>())
-                    {
-                        var portNo = item.Value<int?>("port_no") ?? 0;
-                        if (portNo < 1 || portNo > 16 || config.Ports.Contains(portNo)) continue;
-                        config.Ports.Add(portNo);
-                    }
-                }
-
+                // Server owns the business Port configuration. Controller intentionally
+                // ignores token["ports"] and sends every raw detection with its port_no.
                 result.Add(config);
             }
             return result;
@@ -243,28 +240,29 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
 
         public LaneCalibrationSessionConfig PullLaneCalibration(string currentLaneCalibrationCode)
         {
-            var response = PostAuthenticated("controller/measurement/pull", new JObject
+            var response = PostAuthenticated(LaneCalibrationPullRoute, new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["current_measurement_code"] = currentLaneCalibrationCode ?? string.Empty
+                ["current_lane_calibration_code"] = currentLaneCalibrationCode ?? string.Empty
             });
 
-            var envelopeData = response["data"] as JObject;
-            var payload = envelopeData == null ? null : envelopeData["data"] as JObject;
-            if (payload == null) payload = envelopeData;
+            var payload = response["data"] as JObject;
             if (payload == null) return new LaneCalibrationSessionConfig { Available = false };
 
-            var available = payload.Value<bool?>("measurement_available") ?? false;
+            var available = payload.Value<bool?>("lane_calibration_available") ?? false;
             if (!available) return new LaneCalibrationSessionConfig { Available = false };
 
             var config = new LaneCalibrationSessionConfig
             {
                 Available = true,
-                LaneCalibrationCode = Clean((string)payload["measurement_code"]),
+                LaneCalibrationCode = Clean((string)payload["lane_calibration_code"]),
                 Status = Clean((string)payload["status"]),
                 DesiredState = Clean((string)payload["desired_state"]),
                 Revision = payload.Value<int?>("revision") ?? 1
             };
+
+            if (string.IsNullOrWhiteSpace(config.LaneCalibrationCode))
+                throw new InvalidOperationException("Lane Calibration response requires data.lane_calibration_code when data.lane_calibration_available is true.");
 
             var readers = payload["readers"] as JArray;
             if (readers != null)
@@ -273,36 +271,25 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     var serial = NormalizeSerial((string)reader["serial_number"]);
                     if (string.IsNullOrWhiteSpace(serial)) continue;
+                    if (!IsSdkSerial(serial))
+                        throw new InvalidOperationException(
+                            "Lane Calibration Reader serial_number must be the 4-byte SDK SerialNumber encoded as 8 uppercase hexadecimal characters: " + serial);
                     var readerConfig = new LaneCalibrationReaderConfig
                     {
                         SerialNumber = serial,
                         PowerDbm = Math.Max(0, Math.Min(40, reader.Value<int?>("power_dbm") ?? 30)),
                         ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.Value<int?>("read_interval_ms") ?? 200))
                     };
-                    var portNumbers = reader["ports"] as JArray;
-                    if (portNumbers != null)
-                    {
-                        foreach (var number in portNumbers)
-                        {
-                            int portNo;
-                            if (!int.TryParse(number.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out portNo) || portNo < 1 || portNo > 16) continue;
-                            if (!readerConfig.Ports.Contains(portNo))
-                                readerConfig.Ports.Add(portNo);
-                        }
-                    }
-                    if (readerConfig.Ports.Count > 0
-                        && !config.Readers.Any(x => string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase)))
-                    {
+                    if (!config.Readers.Any(x => string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase)))
                         config.Readers.Add(readerConfig);
-                    }
                 }
             }
             return config;
         }
 
-        public IList<BatchItemResult> PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
+        public void PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
         {
-            if (events == null || events.Count == 0) return new List<BatchItemResult>();
+            if (events == null || events.Count == 0) return;
             var items = new JArray();
             foreach (var item in events)
             {
@@ -321,13 +308,12 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 items.Add(payload);
             }
 
-            var response = PostAuthenticated("controller/measurement/events", new JObject
+            PostAuthenticated(LaneCalibrationEventsRoute, new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["measurement_code"] = laneCalibrationCode,
+                ["lane_calibration_code"] = laneCalibrationCode,
                 ["events"] = items
             });
-            return ParseBatchResults(response, events.Count);
         }
 
         public void ReportLaneCalibrationStatus(string laneCalibrationCode, string status, DateTime occurredAtUtc, string message)
@@ -335,12 +321,12 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             var payload = new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["measurement_code"] = laneCalibrationCode,
+                ["lane_calibration_code"] = laneCalibrationCode,
                 ["status"] = status,
                 ["occurred_at"] = occurredAtUtc.ToUniversalTime().ToString("o")
             };
             if (!string.IsNullOrWhiteSpace(message)) payload["message"] = message.Trim();
-            PostAuthenticated("controller/measurement/status", payload);
+            PostAuthenticated(LaneCalibrationStatusRoute, payload);
         }
 
         private void AuthenticateWithDiscoveryFallback(Exception firstError)
@@ -632,44 +618,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return "offline";
         }
 
-
-        private static IList<BatchItemResult> ParseBatchResults(JObject response, int expectedCount)
-        {
-            var data = response == null ? null : response["data"] as JObject;
-            var rows = data == null ? null : data["results"] as JArray;
-            var failed = data == null ? 0 : data.Value<int?>("failed") ?? 0;
-            if (rows == null)
-            {
-                if (failed > 0) throw new InvalidOperationException("Core API batch response reports failures without item results.");
-                return Enumerable.Range(0, expectedCount)
-                    .Select(index => new BatchItemResult { Index = index, Status = "processed", Message = "Processed" })
-                    .ToList();
-            }
-
-            var result = new List<BatchItemResult>();
-            var seen = new HashSet<int>();
-            foreach (var row in rows.OfType<JObject>())
-            {
-                var index = row.Value<int?>("index") ?? -1;
-                var status = Clean((string)row["status"]);
-                if (index < 0 || index >= expectedCount || !seen.Add(index) || string.IsNullOrWhiteSpace(status))
-                    throw new InvalidOperationException("Core API batch response contains an invalid item result.");
-                var item = new BatchItemResult
-                {
-                    Index = index,
-                    Status = status.ToLowerInvariant(),
-                    Message = Clean((string)row["message"] ?? (string)row["error_code"])
-                };
-                if (!item.Delivered && !item.Rejected)
-                    throw new InvalidOperationException("Core API batch response contains an unsupported status: " + item.Status);
-                result.Add(item);
-            }
-
-            if (result.Count != expectedCount)
-                throw new InvalidOperationException("Core API batch response does not contain one result per submitted item.");
-            return result.OrderBy(item => item.Index).ToList();
-        }
-
         private void LogBatchFailures(string category, JObject response)
         {
             if (_logger == null || response == null) return;
@@ -678,6 +626,21 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             if (failed > 0)
                 _logger.Warn(category, "Server rejected one or more batch items",
                     "failed=" + failed.ToString(CultureInfo.InvariantCulture));
+        }
+
+
+        private static string ReaderRuntimeConfigHash(ReaderDeviceConfig config)
+        {
+            if (config == null) return Sha256(string.Empty);
+            var runtime = new JObject
+            {
+                ["serial_number"] = config.SerialNumber ?? string.Empty,
+                ["power_dbm"] = config.PowerDbm,
+                ["read_interval_ms"] = config.ReadIntervalMs,
+                ["tid_start_address"] = config.TidStartAddress,
+                ["tid_length"] = config.TidLength
+            };
+            return Sha256(runtime.ToString(Formatting.None));
         }
 
         private static string Sha256(string text)
@@ -699,7 +662,18 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
         private static string NormalizeSerial(string value)
         {
             var normalized = Clean(value);
-            return normalized == null ? null : normalized.ToUpperInvariant();
+            if (normalized == null) return null;
+            var text = normalized.ToUpperInvariant();
+            if (text.StartsWith("0X", StringComparison.Ordinal)) text = text.Substring(2);
+            var compact = new string(text.Where(Uri.IsHexDigit).ToArray());
+            return compact.Length == 8 ? compact : text;
+        }
+
+        private static bool IsSdkSerial(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value)
+                && value.Length == 8
+                && value.All(Uri.IsHexDigit);
         }
 
         private static string Clean(string value)

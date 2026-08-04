@@ -16,7 +16,6 @@ namespace NSPGatekeeper.Controller.Domain
         public int ReadIntervalMs { get; set; }
         public int TidStartAddress { get; set; }
         public int TidLength { get; set; }
-        public IList<int> Ports { get; set; }
         public IDictionary<string, string> Options { get; set; }
 
         public ReaderDeviceConfig()
@@ -26,17 +25,7 @@ namespace NSPGatekeeper.Controller.Domain
             ReadIntervalMs = 200;
             TidStartAddress = 2;
             TidLength = 4;
-            Ports = new List<int>();
             Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        public IList<int> PortNumbers()
-        {
-            return (Ports ?? new List<int>())
-                .Where(value => value >= 1 && value <= 16)
-                .Distinct()
-                .OrderBy(value => value)
-                .ToList();
         }
     }
 
@@ -52,8 +41,12 @@ namespace NSPGatekeeper.Controller.Domain
 
     public sealed class ReaderStatus
     {
+        // SerialNumber is the configured Server identity and remains the runtime/status key.
         public string DriverKey { get; set; }
         public string SerialNumber { get; set; }
+        // DetectedSdkSerialNumber and DetectedEndpoint are physical observations read locally.
+        public string DetectedSdkSerialNumber { get; set; }
+        public string DetectedEndpoint { get; set; }
         public string Model { get; set; }
         public string Endpoint { get; set; }
         public bool Online { get; set; }
@@ -110,13 +103,11 @@ namespace NSPGatekeeper.Controller.Domain
         public string SerialNumber { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
-        public IList<int> Ports { get; set; }
 
         public LaneCalibrationReaderConfig()
         {
             PowerDbm = 30;
             ReadIntervalMs = 200;
-            Ports = new List<int>();
         }
     }
 
@@ -140,27 +131,4 @@ namespace NSPGatekeeper.Controller.Domain
         public LaneCalibrationEvent Event { get; set; }
         public int Attempts { get; set; }
     }
-
-    public sealed class BatchItemResult
-    {
-        public int Index { get; set; }
-        public string Status { get; set; }
-        public string Message { get; set; }
-
-        public bool Delivered
-        {
-            get
-            {
-                return string.Equals(Status, "processed", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(Status, "duplicate", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(Status, "ignored", StringComparison.OrdinalIgnoreCase);
-            }
-        }
-
-        public bool Rejected
-        {
-            get { return string.Equals(Status, "rejected", StringComparison.OrdinalIgnoreCase); }
-        }
-    }
-
 }

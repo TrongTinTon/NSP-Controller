@@ -1,21 +1,14 @@
 # Adding a Reader driver
 
-Implement:
+A Reader driver must:
 
-```text
-IReaderDriverFactory
-IReaderRuntime
-```
+- connect using the physical endpoint managed locally by Controller;
+- expose the hardware SerialNumber when the SDK supports it;
+- reconnect automatically after transient communication failure;
+- apply technical Power, interval and TID settings;
+- inventory the hardware ports supported by that driver;
+- emit every raw `RfidDetection` with `SerialNumber`, `PortNo`, `Tid`, timestamp and optional RSSI;
+- never filter detections using Edge business Port configuration;
+- report clear technical status and errors.
 
-A runtime must:
-
-- use `ReaderDeviceConfig.SerialNumber` as the Reader identity;
-- apply only configured `Ports`;
-- emit `RfidDetection` with `SerialNumber`, `PortNo`, `Tid`, timestamp and optional RSSI;
-- emit `ReaderStatus` whenever connection state changes;
-- isolate failures inside its own worker/thread;
-- stop and dispose without blocking other Reader runtimes.
-
-Register the factory in `Bootstrap/Program.cs`.
-
-Physical connection settings belong to Controller local configuration. Cloud/Edge runtime payloads must not contain vendor endpoint credentials or driver-specific options.
+Business Port validation belongs to Edge.

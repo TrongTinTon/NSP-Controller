@@ -226,7 +226,10 @@ namespace NSPGatekeeper.Controller.Infrastructure.Discovery
                 if (udp != null)
                 {
                     try { udp.Close(); }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        if (_logger != null) _logger.Warn("zeroconf", "mDNS socket close failed", ex.Message);
+                    }
                 }
             }
         }

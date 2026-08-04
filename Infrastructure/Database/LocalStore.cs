@@ -35,10 +35,10 @@ namespace NSPGatekeeper.Controller.Infrastructure.Database
             const string sql = @"
 INSERT INTO controller_reader
 (serial_number, driver_key, endpoint, port, enabled, config_hash,
- power_dbm, read_interval_ms, tid_start_address, tid_length, ports_json, options_json, updated_at)
+ power_dbm, read_interval_ms, tid_start_address, tid_length, options_json, updated_at)
 VALUES
 (@serial_number, @driver_key, @endpoint, @port, @enabled, @config_hash,
- @power_dbm, @read_interval_ms, @tid_start_address, @tid_length, CAST(@ports_json AS jsonb), CAST(@options_json AS jsonb), NOW())
+ @power_dbm, @read_interval_ms, @tid_start_address, @tid_length, CAST(@options_json AS jsonb), NOW())
 ON CONFLICT (serial_number) DO UPDATE SET
  driver_key=EXCLUDED.driver_key,
  endpoint=EXCLUDED.endpoint,
@@ -49,7 +49,6 @@ ON CONFLICT (serial_number) DO UPDATE SET
  read_interval_ms=EXCLUDED.read_interval_ms,
  tid_start_address=EXCLUDED.tid_start_address,
  tid_length=EXCLUDED.tid_length,
- ports_json=EXCLUDED.ports_json,
  options_json=EXCLUDED.options_json,
  updated_at=NOW();";
 
@@ -66,7 +65,6 @@ ON CONFLICT (serial_number) DO UPDATE SET
                 cmd.Parameters.AddWithValue("read_interval_ms", config.ReadIntervalMs);
                 cmd.Parameters.AddWithValue("tid_start_address", config.TidStartAddress);
                 cmd.Parameters.AddWithValue("tid_length", config.TidLength);
-                cmd.Parameters.AddWithValue("ports_json", JsonConvert.SerializeObject(config.PortNumbers()));
                 cmd.Parameters.AddWithValue("options_json", JsonConvert.SerializeObject(config.Options ?? new Dictionary<string, string>()));
                 cmd.ExecuteNonQuery();
             }
@@ -92,7 +90,7 @@ ON CONFLICT (serial_number) DO UPDATE SET
         {
             const string sql = @"
 SELECT serial_number, driver_key, endpoint, port, enabled, config_hash,
-       power_dbm, read_interval_ms, tid_start_address, tid_length, ports_json::text, options_json::text
+       power_dbm, read_interval_ms, tid_start_address, tid_length, options_json::text
   FROM controller_reader
  ORDER BY serial_number";
             var result = new List<ReaderDeviceConfig>();
@@ -115,8 +113,7 @@ SELECT serial_number, driver_key, endpoint, port, enabled, config_hash,
                         ReadIntervalMs = reader.GetInt32(7),
                         TidStartAddress = reader.GetInt32(8),
                         TidLength = reader.GetInt32(9),
-                        Ports = JsonConvert.DeserializeObject<List<int>>(reader.GetString(10)) ?? new List<int>(),
-                        Options = ToCaseInsensitiveOptions(reader.GetString(11))
+                        Options = ToCaseInsensitiveOptions(reader.GetString(10))
                     });
                 }
             }
@@ -151,10 +148,12 @@ UPDATE controller_reader
             if (status == null || string.IsNullOrWhiteSpace(status.SerialNumber)) return;
             const string sql = @"
 INSERT INTO controller_reader_runtime_status
-(serial_number, driver_key, model, endpoint, online, message, firmware_version, power_dbm, read_interval_ms, ports_json, updated_at)
+(serial_number, detected_sdk_serial, detected_endpoint, driver_key, model, endpoint, online, message, firmware_version, power_dbm, read_interval_ms, ports_json, updated_at)
 VALUES
-(@serial_number, @driver_key, @model, @endpoint, @online, @message, @firmware_version, @power_dbm, @read_interval_ms, CAST(@ports_json AS jsonb), @updated_at)
+(@serial_number, @detected_sdk_serial, @detected_endpoint, @driver_key, @model, @endpoint, @online, @message, @firmware_version, @power_dbm, @read_interval_ms, CAST(@ports_json AS jsonb), @updated_at)
 ON CONFLICT (serial_number) DO UPDATE SET
+ detected_sdk_serial=EXCLUDED.detected_sdk_serial,
+ detected_endpoint=EXCLUDED.detected_endpoint,
  driver_key=EXCLUDED.driver_key,
  model=EXCLUDED.model,
  endpoint=EXCLUDED.endpoint,
@@ -169,6 +168,8 @@ ON CONFLICT (serial_number) DO UPDATE SET
             using (var cmd = new NpgsqlCommand(sql, conn))
             {
                 AddText(cmd, "serial_number", status.SerialNumber.Trim().ToUpperInvariant());
+                AddText(cmd, "detected_sdk_serial", status.DetectedSdkSerialNumber);
+                AddText(cmd, "detected_endpoint", status.DetectedEndpoint);
                 AddText(cmd, "driver_key", status.DriverKey);
                 AddText(cmd, "model", status.Model);
                 AddText(cmd, "endpoint", status.Endpoint);
@@ -183,15 +184,19 @@ ON CONFLICT (serial_number) DO UPDATE SET
             }
         }
 
+        public void ClearReaderRuntimeStatuses()
+        {
+            ExecuteNonQuery("DELETE FROM controller_reader_runtime_status;");
+        }
+
         public IList<ReaderStatus> GetReaderStatuses()
         {
             const string sql = @"
-SELECT s.serial_number, s.driver_key, s.model, s.endpoint, s.online, s.message, s.firmware_version,
-       s.power_dbm, s.read_interval_ms, s.ports_json::text, s.updated_at
+SELECT s.serial_number, s.detected_sdk_serial, s.detected_endpoint, s.driver_key, s.model, s.endpoint,
+       s.online, s.message, s.firmware_version, s.power_dbm, s.read_interval_ms, s.ports_json::text, s.updated_at
   FROM controller_reader_runtime_status s
-  JOIN controller_reader r ON r.serial_number = s.serial_number
- WHERE r.enabled = TRUE
- ORDER BY s.serial_number";
+ WHERE NULLIF(BTRIM(s.detected_sdk_serial), '') IS NOT NULL
+ ORDER BY s.detected_sdk_serial, s.updated_at DESC";
             var result = new List<ReaderStatus>();
             using (var conn = Open())
             using (var cmd = new NpgsqlCommand(sql, conn))
@@ -199,20 +204,21 @@ SELECT s.serial_number, s.driver_key, s.model, s.endpoint, s.online, s.message, 
             {
                 while (reader.Read())
                 {
-                    var serial = reader.GetString(0);
                     result.Add(new ReaderStatus
                     {
-                        SerialNumber = serial,
-                        DriverKey = GetNullableString(reader, 1),
-                        Model = GetNullableString(reader, 2),
-                        Endpoint = GetNullableString(reader, 3),
-                        Online = reader.GetBoolean(4),
-                        Message = GetNullableString(reader, 5),
-                        FirmwareVersion = GetNullableString(reader, 6),
-                        PowerDbm = reader.GetInt32(7),
-                        ReadIntervalMs = reader.GetInt32(8),
-                        Ports = JsonConvert.DeserializeObject<List<int>>(reader.GetString(9)) ?? new List<int>(),
-                        UpdatedAtUtc = reader.GetDateTime(10).ToUniversalTime()
+                        SerialNumber = reader.GetString(0),
+                        DetectedSdkSerialNumber = GetNullableString(reader, 1),
+                        DetectedEndpoint = GetNullableString(reader, 2),
+                        DriverKey = GetNullableString(reader, 3),
+                        Model = GetNullableString(reader, 4),
+                        Endpoint = GetNullableString(reader, 5),
+                        Online = reader.GetBoolean(6),
+                        Message = GetNullableString(reader, 7),
+                        FirmwareVersion = GetNullableString(reader, 8),
+                        PowerDbm = reader.GetInt32(9),
+                        ReadIntervalMs = reader.GetInt32(10),
+                        Ports = JsonConvert.DeserializeObject<List<int>>(reader.GetString(11)) ?? new List<int>(),
+                        UpdatedAtUtc = reader.GetDateTime(12).ToUniversalTime()
                     });
                 }
             }
@@ -384,12 +390,6 @@ SELECT id, event_uid, lane_calibration_code, revision, power_dbm, read_interval_
         public void MarkLaneCalibrationSent(IList<long> ids)
         {
             UpdateByIds(ids, "UPDATE controller_lane_calibration_outbox SET status='sent', sent_at=NOW(), last_error=NULL WHERE id = ANY(@ids)", null);
-        }
-
-        public void MarkLaneCalibrationDead(IList<long> ids, string error)
-        {
-            UpdateByIds(ids, "UPDATE controller_lane_calibration_outbox SET status='dead', last_error=@error WHERE id = ANY(@ids)",
-                delegate(NpgsqlCommand cmd) { AddText(cmd, "error", error ?? "permanent_error"); });
         }
 
         public void MarkLaneCalibrationFailed(IList<long> ids, string error, int attempts)

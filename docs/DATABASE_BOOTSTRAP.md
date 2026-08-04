@@ -16,7 +16,7 @@ NSP_POSTGRES_CONNECTION
 NSP_POSTGRES_ADMIN_CONNECTION
 ```
 
-The 1.4.0 schema is a clean Reader-Port schema. A local database created by an Antenna-based Controller version should be recreated or migrated explicitly before using this source.
+The 1.4.8 schema stores Reader technical configuration without business Port lists. A local database created by a legacy Antenna-based Controller should be recreated or migrated explicitly before using this source. An existing `ports_json` column may remain unused, but fresh installs do not create it in `controller_reader`.
 
 Tables:
 

@@ -19,9 +19,11 @@ namespace NSPGatekeeper.Controller.Services
         private readonly ReaderManager _readers;
         private readonly FileLogger _logger;
         private readonly object _gate = new object();
+        private readonly object _readerConfigGate = new object();
         private readonly List<Task> _tasks = new List<Task>();
         private CancellationTokenSource _cts;
         private bool _running;
+        private bool _readerConfigSynchronized;
         private string _connectionMessage = "stopped";
 
         public ControllerRuntime(AppSettings settings, LocalStore store, CoreApiClient coreApi, ReaderManager readers, FileLogger logger)
@@ -48,6 +50,7 @@ namespace NSPGatekeeper.Controller.Services
                 _cts = new CancellationTokenSource();
                 var token = _cts.Token;
                 _running = true;
+                lock (_readerConfigGate) _readerConfigSynchronized = false;
 
                 _readers.StartCachedConfiguration();
 
@@ -59,6 +62,15 @@ namespace NSPGatekeeper.Controller.Services
                 _tasks.Add(Task.Run(() => RunLoop("lane-calibration-push", PushLaneCalibrationEventsOnce, () => TimeSpan.FromMilliseconds(_settings.LaneCalibrationPushIntervalMs), token)));
                 _tasks.Add(Task.Run(() => RunLoop("cleanup", CleanupOnce, () => TimeSpan.FromSeconds(_settings.CleanupIntervalSec), token)));
             }
+            if (_logger != null)
+                _logger.Info(
+                    "runtime",
+                    "Controller workers started",
+                    "heartbeat_sec=" + _settings.HeartbeatIntervalSec
+                    + "; reader_config_sec=" + _settings.ReaderConfigIntervalSec
+                    + "; reader_status_sec=" + _settings.ReaderStatusIntervalSec
+                    + "; lane_calibration_idle_sec=" + _settings.LaneCalibrationIdlePollIntervalSec
+                    + "; lane_calibration_active_sec=" + _settings.LaneCalibrationActivePollIntervalSec);
             NotifyStateChanged();
         }
 
@@ -75,15 +87,25 @@ namespace NSPGatekeeper.Controller.Services
                 tasks = _tasks.ToArray();
                 _tasks.Clear();
             }
-            try { if (cts != null) cts.Cancel(); } catch { }
-            try { Task.WaitAll(tasks, 4000); } catch { }
+            if (cts != null) cts.Cancel();
+            try
+            {
+                if (!Task.WaitAll(tasks, 4000) && _logger != null)
+                    _logger.Warn("runtime", "Controller workers did not stop before timeout", "worker_count=" + tasks.Length);
+            }
+            catch (AggregateException ex)
+            {
+                if (_logger != null) _logger.Error("runtime", "Controller worker shutdown returned errors", ex);
+            }
             _readers.ClearLaneCalibration("controller_stopped");
+            if (_logger != null) _logger.Info("runtime", "Controller workers stopped");
             NotifyStateChanged();
         }
 
         public void ResetConnection()
         {
             _coreApi.InvalidateToken();
+            lock (_readerConfigGate) _readerConfigSynchronized = false;
             SetConnectionMessage("connection_settings_changed");
         }
 
@@ -121,8 +143,26 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PullReaderConfigOnce()
         {
+            lock (_readerConfigGate)
+            {
+                SynchronizeReaderConfigurationLocked();
+            }
+        }
+
+        private void EnsureReaderConfigurationSynchronized()
+        {
+            lock (_readerConfigGate)
+            {
+                if (_readerConfigSynchronized) return;
+                SynchronizeReaderConfigurationLocked();
+            }
+        }
+
+        private void SynchronizeReaderConfigurationLocked()
+        {
             var configs = _coreApi.PullReaderConfigs();
             _readers.ApplyServerConfiguration(configs);
+            _readerConfigSynchronized = true;
             if (_logger != null) _logger.Info("reader-config", "Reader configuration synchronized", "count=" + configs.Count);
         }
 
@@ -159,6 +199,20 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PullLaneCalibrationOnce()
         {
+            try
+            {
+                EnsureReaderConfigurationSynchronized();
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null)
+                    _logger.Warn(
+                        "lane-calibration",
+                        "Lane Calibration is waiting because Reader configuration could not be synchronized",
+                        ex.Message);
+                return;
+            }
+
             var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
             if (config == null || !config.Available || !config.IsRunningDesired)
             {
@@ -169,7 +223,17 @@ namespace NSPGatekeeper.Controller.Services
 
             try
             {
-                _readers.ApplyLaneCalibrationConfiguration(config);
+                ApplyLaneCalibrationWithReaderConfigRefresh(config);
+            }
+            catch (ReaderConfigurationUnavailableException ex)
+            {
+                if (_logger != null)
+                    _logger.Warn(
+                        "lane-calibration",
+                        "Lane Calibration is waiting for Reader configuration; Cloud status is not changed to failed",
+                        "code=" + config.LaneCalibrationCode + "; reader=" + ex.SerialNumber + "; reason=" + ex.Message);
+                NotifyStateChanged();
+                return;
             }
             catch (Exception ex)
             {
@@ -184,24 +248,48 @@ namespace NSPGatekeeper.Controller.Services
                 return;
             }
 
-            if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase) && _logger != null)
             {
-                try
-                {
-                    _coreApi.ReportLaneCalibrationStatus(
-                        config.LaneCalibrationCode,
-                        "running",
-                        DateTime.UtcNow,
-                        "Controller started Lane Calibration");
-                }
-                catch (Exception ex)
-                {
-                    if (_coreApi.IsRateLimitError(ex)) throw;
-                    if (_logger != null) _logger.Warn("lane-calibration", "Could not report Lane Calibration running status; next poll will retry", ex.Message);
-                }
+                _logger.Info(
+                    "lane-calibration",
+                    "Lane Calibration configuration accepted; waiting for the first Reader event before Edge changes the session to running",
+                    "code=" + config.LaneCalibrationCode + "; revision=" + config.Revision);
             }
 
             NotifyStateChanged();
+        }
+
+        private void ApplyLaneCalibrationWithReaderConfigRefresh(LaneCalibrationSessionConfig config)
+        {
+            ReaderConfigurationSynchronizationException synchronizationError;
+            try
+            {
+                _readers.ApplyLaneCalibrationConfiguration(config);
+                return;
+            }
+            catch (ReaderConfigurationSynchronizationException ex)
+            {
+                synchronizationError = ex;
+                if (_logger != null)
+                    _logger.Warn(
+                        "lane-calibration",
+                        "Reader configuration mismatch detected; refreshing device configuration before retry",
+                        "reader=" + ex.SerialNumber + "; reason=" + ex.Message);
+            }
+
+            try
+            {
+                PullReaderConfigOnce();
+            }
+            catch (Exception refreshError)
+            {
+                throw new ReaderConfigurationUnavailableException(
+                    synchronizationError.SerialNumber,
+                    "Reader configuration refresh failed; Lane Calibration will retry without changing Cloud status to failed. "
+                    + refreshError.Message);
+            }
+
+            _readers.ApplyLaneCalibrationConfiguration(config);
         }
 
         public void PushLaneCalibrationEventsOnce()
@@ -218,30 +306,25 @@ namespace NSPGatekeeper.Controller.Services
 
             try
             {
-                var results = _coreApi.PushLaneCalibrationEvents(laneCalibrationCode, sameSession.Select(x => x.Event).ToList());
-                var deliveredIds = results.Where(result => result.Delivered).Select(result => sameSession[result.Index].Id).ToList();
-                var rejected = results.Where(result => result.Rejected).ToList();
-                if (deliveredIds.Count > 0) _store.MarkLaneCalibrationSent(deliveredIds);
-                if (rejected.Count > 0)
-                {
-                    var rejectedIds = rejected.Select(result => sameSession[result.Index].Id).ToList();
-                    var error = string.Join("; ", rejected.Select(result => result.Message ?? "rejected").Distinct().ToArray());
-                    _store.MarkLaneCalibrationDead(rejectedIds, error);
-                    if (_logger != null) _logger.Warn("lane-calibration-push", "Lane Calibration events rejected", "count=" + rejected.Count + "; error=" + error);
-                }
-                if (_logger != null) _logger.Info("lane-calibration-push", "Lane Calibration event batch delivered", "code=" + laneCalibrationCode + "; delivered=" + deliveredIds.Count + "; rejected=" + rejected.Count);
+                _coreApi.PushLaneCalibrationEvents(
+                    laneCalibrationCode,
+                    sameSession.Select(x => x.Event).ToList());
+                _store.MarkLaneCalibrationSent(ids);
+                if (_logger != null)
+                    _logger.Info(
+                        "lane-calibration-push",
+                        "Lane Calibration raw event batch acknowledged",
+                        "code=" + laneCalibrationCode + "; count=" + ids.Count + "; http=200");
             }
             catch (Exception ex)
             {
-                if (_coreApi.IsRateLimitError(ex)) throw;
-                if (_coreApi.IsPermanentRequestError(ex))
-                {
-                    _store.MarkLaneCalibrationDead(ids, ex.Message);
-                    if (_logger != null) _logger.Error("lane-calibration-push", "Permanent API error; Lane Calibration batch moved to dead state", ex);
-                    return;
-                }
                 var attempts = sameSession.Max(x => x.Attempts) + 1;
                 _store.MarkLaneCalibrationFailed(ids, ex.Message, attempts);
+                if (_logger != null)
+                    _logger.Warn(
+                        "lane-calibration-push",
+                        "Lane Calibration raw event batch was not acknowledged; outbox retained for retry",
+                        "code=" + laneCalibrationCode + "; count=" + ids.Count + "; attempts=" + attempts + "; error=" + ex.Message);
                 throw;
             }
         }
@@ -277,7 +360,7 @@ namespace NSPGatekeeper.Controller.Services
                     }
                     else if (_logger != null)
                     {
-                        _logger.Warn(name, "Worker iteration failed", ex.Message);
+                        _logger.Error(name, "Worker iteration failed", ex);
                     }
                 }
 
@@ -309,9 +392,14 @@ namespace NSPGatekeeper.Controller.Services
         private void NotifyStateChanged()
         {
             var handler = StateChanged;
-            if (handler != null)
+            if (handler == null) return;
+            try
             {
-                try { handler(); } catch { }
+                handler();
+            }
+            catch (Exception ex)
+            {
+                if (_logger != null) _logger.Error("runtime", "StateChanged subscriber failed", ex);
             }
         }
 

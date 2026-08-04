@@ -1,174 +1,186 @@
-# Controller ↔ Edge API contract
+# Controller API contract
 
-All routes are `POST /v1/<route>` and require Core API authentication.
+## Reader configuration: Edge → Controller
 
-## Heartbeat
+Route:
 
-Route: `heartbeat`
+```text
+POST controller/device-config/pull
+```
+
+Controller consumes Reader identity and technical parameters:
 
 ```json
 {
-  "controller_code": "CTRL-01"
+  "serial_number": "24113001",
+  "reader_parameters": {
+    "power_dbm": 5,
+    "read_interval_ms": 500,
+    "tid_start_address": 0,
+    "tid_length": 6
+  },
+  "ports": [
+    {"port_no": 1},
+    {"port_no": 2}
+  ]
 }
 ```
 
-## Pull Reader configuration
+`ports` is accepted for compatibility but intentionally ignored by Controller. An empty or missing list does not disable the Reader and does not prevent COM connection.
 
-Route: `controller/device-config/pull`
+## Reader status: Controller → Edge
+
+Route:
+
+```text
+POST devices/report
+```
+
+```json
+{
+  "serial_number": "24113001",
+  "ports": [1, 2, 3, 4],
+  "device_status": "online",
+  "last_seen_at": "2026-08-04T11:30:00Z",
+  "power_dbm": 5,
+  "read_interval_ms": 500
+}
+```
+
+Status `ports` describes the hardware ports scanned by the driver. It is not a business whitelist.
+
+## Raw Parking detection: Controller → Edge
+
+Route:
+
+```text
+POST parking/detections/push
+```
+
+```json
+{
+  "event_uid": "CTRL-01-RFID-...",
+  "serial_number": "24113001",
+  "port_no": 3,
+  "tid": "E280689400001111",
+  "detected_at": "2026-08-04T11:30:00.125Z"
+}
+```
+
+Controller forwards the event even when `port_no` is not configured for a Parking sequence. Edge owns filtering and may return `ignored`.
+
+## Lane Calibration configuration: Edge → Controller
+
+Route:
+
+```text
+POST controller/lane-calibrations/pull
+```
 
 Request:
 
 ```json
 {
-  "controller_code": "CTRL-01"
-}
-```
-
-Relevant response data:
-
-```json
-{
-  "devices": [
-    {
-      "serial_number": "RDR-SN-001",
-      "reader_parameters": {
-        "power_dbm": 30,
-        "read_interval_ms": 200,
-        "tid_start_address": 2,
-        "tid_length": 4
-      },
-      "ports": [
-        {"port_no": 1},
-        {"port_no": 2}
-      ]
-    }
-  ]
-}
-```
-
-The Edge payload does not contain physical IP/COM configuration. Driver, endpoint, TCP/COM port and vendor options are Controller-local settings keyed by Reader serial number.
-
-## Report Reader status
-
-Route: `devices/report`
-
-```json
-{
   "controller_code": "CTRL-01",
-  "devices": [
-    {
-      "serial_number": "RDR-SN-001",
-      "ports": [1, 2],
-      "device_status": "online",
-      "last_seen_at": "2026-08-04T07:30:00Z",
-      "firmware_version": "1.0.0",
-      "power_dbm": 30,
-      "read_interval_ms": 200
-    }
-  ]
+  "current_lane_calibration_code": "CAL-0001"
 }
 ```
 
-## Push raw Parking detections
-
-Route: `parking/detections/push`
-
-Maximum batch: 1000.
-
-```json
-{
-  "controller_code": "CTRL-01",
-  "detections": [
-    {
-      "event_uid": "CTRL-01-RFID-...",
-      "serial_number": "RDR-SN-001",
-      "port_no": 1,
-      "detected_at": "2026-08-04T07:30:00.125Z",
-      "tid": "E280689400001111"
-    }
-  ]
-}
-```
-
-The Controller sends raw technical observations only. Edge resolves TID through its runtime assignment projection and performs Parking classification.
-
-## Pull Lane Calibration
-
-The current Edge route names retain `measurement` for API compatibility. Controller domain and UI use the term Lane Calibration.
-
-Route: `controller/measurement/pull`
-
-```json
-{
-  "controller_code": "CTRL-01",
-  "current_measurement_code": "CAL-0001"
-}
-```
-
-Relevant response data:
+Response when a session is available:
 
 ```json
 {
   "data": {
-    "measurement_available": true,
-    "measurement_code": "CAL-0001",
+    "lane_calibration_available": true,
+    "lane_calibration_code": "CAL-0001",
     "status": "ready",
     "desired_state": "running",
-    "revision": 2,
+    "revision": 12,
     "readers": [
       {
-        "serial_number": "RDR-SN-001",
-        "power_dbm": 28,
-        "read_interval_ms": 100,
-        "ports": [1, 2]
+        "serial_number": "24523021",
+        "power_dbm": 5,
+        "read_interval_ms": 500
       }
     ]
   }
 }
 ```
 
-Selected Reader configurations temporarily override operational power, interval and active Port set. Readers participating in Lane Calibration are isolated from Parking delivery until the session stops.
+Response when no session is available:
 
-## Push Lane Calibration events
+```json
+{
+  "data": {
+    "lane_calibration_available": false
+  }
+}
+```
 
-Route: `controller/measurement/events`
+Controller uses the session identity, Reader SDK serial, temporary Power and temporary Read Interval. Controller does not use a business Port list.
 
-Maximum batch: 100.
+## Raw Lane Calibration events: Controller → Edge
+
+Route:
+
+```text
+POST controller/lane-calibrations/events
+```
+
+Request:
 
 ```json
 {
   "controller_code": "CTRL-01",
-  "measurement_code": "CAL-0001",
+  "lane_calibration_code": "CAL-0001",
   "events": [
     {
       "event_uid": "CTRL-01-CAL-...",
-      "revision": 2,
-      "power_dbm": 28,
-      "read_interval_ms": 100,
-      "serial_number": "RDR-SN-001",
-      "port_no": 1,
+      "revision": 12,
+      "power_dbm": 5,
+      "read_interval_ms": 500,
+      "serial_number": "24523021",
+      "port_no": 4,
       "tid": "E280689400001111",
-      "read_at": "2026-08-04T07:31:00.125Z",
+      "read_at": "2026-08-04T11:31:00.125Z",
       "rssi_dbm": -48.5
     }
   ]
 }
 ```
 
-The event stores the actual runtime power and interval applied by the Controller. Item results `processed`, `duplicate`, and `ignored` are final delivery states. `rejected` is moved to the local dead state.
+Successful response:
 
-## Report Lane Calibration status
+```http
+HTTP/1.1 200 OK
+```
 
-Route: `controller/measurement/status`
+```json
+{
+  "message": "Lane Calibration events received"
+}
+```
+
+Controller treats HTTP 200 as acknowledgement for the complete submitted batch and marks all included outbox rows sent. It does not parse `processed`, `duplicate`, `ignored`, `rejected`, item indexes or business results. Edge owns idempotency, Port filtering and business processing.
+
+The defined server-side failure response is HTTP 500. On HTTP 500 or a transport failure, Controller retains the full batch in the durable outbox and retries with backoff. Unexpected non-200 responses are not interpreted as business rejections; the batch remains pending.
+
+## Lane Calibration status: Controller → Edge
+
+Route:
+
+```text
+POST controller/lane-calibrations/status
+```
 
 ```json
 {
   "controller_code": "CTRL-01",
-  "measurement_code": "CAL-0001",
-  "status": "running",
-  "occurred_at": "2026-08-04T07:31:00Z",
-  "message": "Controller started Lane Calibration"
+  "lane_calibration_code": "CAL-0001",
+  "status": "failed",
+  "occurred_at": "2026-08-04T11:31:00.125Z",
+  "message": "Reader configuration is invalid"
 }
 ```
 
-Allowed status values are controlled by Edge. Controller currently reports `running` after applying a `ready` configuration.
+Successful response is HTTP 200 with a simple message.

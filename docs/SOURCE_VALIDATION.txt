@@ -1,18 +1,12 @@
-NSP Controller 1.4.0 static validation scope
+NSP Controller 1.4.8 validation scope
 
-- C# delimiter/string/comment lexical validation
-- XML parsing: App.config, project file and manifest
-- PostgreSQL schema/reference consistency checks
-- API route and JSON field audit against current Edge source
-- forbidden business ownership scan
-- Reader Port terminology scan
-- duplicate type/method name scan
-- archive integrity and SHA-256 generation
-
-Expected API fields:
-- Reader config: ports[].port_no
-- Reader status: ports[]
-- Parking detection: serial_number + port_no
-- Lane Calibration event: serial_number + port_no
-
-No .NET SDK/MSBuild compiler is available in the analysis environment. A Release x86 and x64 build on Windows remains required before deployment.
+- Reader starts when present and enabled in Server configuration, regardless of `ports`.
+- Reader config parser ignores Server `ports`.
+- Reader config hash excludes Server `ports`, so a Port-only Server change does not restart the Reader.
+- CF-E718 scans hardware ports 1-4.
+- Every valid raw detection is queued with `port_no`.
+- Lane Calibration routes all detections from selected Readers; Edge filters ports.
+- `controller_reader` does not store business `ports_json`.
+- Readers UI is read-only and contains only identity, connection, status, detail and update time.
+- Dynamic COM rebinding remains based on SDK SerialNumber.
+- Static validation only; Windows MSBuild and physical Reader tests are still required.

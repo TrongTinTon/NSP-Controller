@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Linq.Expressions;
@@ -42,6 +43,36 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             get { return IntPtr.Size == 8; }
         }
 
+        internal static string DescribeRuntime()
+        {
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, DllName);
+            var file = new FileInfo(path);
+            string version = null;
+            try
+            {
+                if (file.Exists) version = FileVersionInfo.GetVersionInfo(path).FileVersion;
+            }
+            catch
+            {
+                version = null;
+            }
+
+            return "mode=" + (UseManagedX64Sdk ? "x64-managed-reflection" : "x86-native-pinvoke")
+                + "; path=" + path
+                + "; exists=" + file.Exists
+                + "; size=" + (file.Exists ? file.Length.ToString() : "0")
+                + "; file_version=" + (string.IsNullOrWhiteSpace(version) ? "<unknown>" : version)
+                + (UseManagedX64Sdk
+                    ? "; managed_reader_type=" + ManagedSdk.LoadedReaderTypeName
+                      + "; managed_sessions=" + ManagedSdk.SessionCount
+                    : string.Empty);
+        }
+
+        internal static string FormatResult(int result)
+        {
+            return result.ToString() + " (0x" + unchecked((uint)result).ToString("X8") + ")";
+        }
+
         internal static void InitRFIDCallBack(RFIDCallBack callback, bool uidBack, int portHandle)
         {
             if (UseManagedX64Sdk)
@@ -59,7 +90,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 var session = ManagedSdk.Create();
                 var ret = session.OpenNetPort(port, ipAddress, ref comAddress);
                 if (ret == 0) portHandle = session.Handle;
-                else ManagedSdk.Remove(session.Handle);
+                else ManagedSdk.Close(session.Handle);
                 return ret;
             }
             return NativeMethods.OpenNetPort(port, ipAddress, ref comAddress, ref portHandle);
@@ -78,47 +109,23 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 var session = ManagedSdk.Create();
                 var ret = session.OpenComPort(port, ref comAddress, baud);
                 if (ret == 0) portHandle = session.Handle;
-                else ManagedSdk.Remove(session.Handle);
+                else ManagedSdk.Close(session.Handle);
                 return ret;
             }
             return NativeMethods.OpenComPort(port, ref comAddress, baud, ref portHandle);
         }
 
-        internal static int AutoOpenComPort(ref int port, ref byte comAddress, byte baud, ref int portHandle)
-        {
-            if (UseManagedX64Sdk)
-            {
-                var session = ManagedSdk.Create();
-                var ret = session.AutoOpenComPort(ref port, ref comAddress, baud);
-                if (ret == 0) portHandle = session.Handle;
-                else ManagedSdk.Remove(session.Handle);
-                return ret;
-            }
-            return NativeMethods.AutoOpenComPort(ref port, ref comAddress, baud, ref portHandle);
-        }
 
-        internal static int CloseSpecComPort(int port)
-        {
-            if (UseManagedX64Sdk) return 0;
-            return NativeMethods.CloseSpecComPort(port);
-        }
-
-        internal static int CloseUSBPort(int portHandle)
+        internal static int CloseComPort(int port, int portHandle)
         {
             if (UseManagedX64Sdk) return ManagedSdk.Close(portHandle);
-            return NativeMethods.CloseUSBPort(portHandle);
+            return NativeMethods.CloseSpecComPort(port);
         }
 
         internal static int StopInventory(ref byte comAddress, int portHandle)
         {
             if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).StopInventory(ref comAddress);
             return NativeMethods.StopInventory(ref comAddress, portHandle);
-        }
-
-        internal static int SetRfPower(ref byte comAddress, byte powerDbm, int portHandle)
-        {
-            if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).SetRfPower(ref comAddress, powerDbm);
-            return NativeMethods.SetRfPower(ref comAddress, powerDbm, portHandle);
         }
 
         internal static int GetSeriaNo(ref byte comAddress, byte[] serialNo, int portHandle)
@@ -131,44 +138,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).GetModuleVersion(ref comAddress, moduleVersion);
             return NativeMethods.GetModuleVersion(ref comAddress, moduleVersion, portHandle);
-        }
-
-        internal static int GetReaderInformation(
-            ref byte comAddress,
-            byte[] versionInfo,
-            ref byte readerType,
-            ref byte trType,
-            ref byte maxFrequency,
-            ref byte minFrequency,
-            ref byte powerDbm,
-            ref byte scanTime,
-            ref byte antenna,
-            ref byte beepEnabled,
-            ref byte outputRep,
-            ref byte checkAntenna,
-            int portHandle)
-        {
-            if (UseManagedX64Sdk)
-            {
-                return ManagedSdk.Get(portHandle).GetReaderInformation(
-                    ref comAddress, versionInfo, ref readerType, ref trType, ref maxFrequency, ref minFrequency,
-                    ref powerDbm, ref scanTime, ref antenna, ref beepEnabled, ref outputRep, ref checkAntenna);
-            }
-            return NativeMethods.GetReaderInformation(
-                ref comAddress, versionInfo, ref readerType, ref trType, ref maxFrequency, ref minFrequency,
-                ref powerDbm, ref scanTime, ref antenna, ref beepEnabled, ref outputRep, ref checkAntenna, portHandle);
-        }
-
-        internal static int GetAntennaPower(ref byte comAddress, byte[] powerDbm, ref int length, int portHandle)
-        {
-            if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).GetAntennaPower(ref comAddress, powerDbm, ref length);
-            return NativeMethods.GetAntennaPower(ref comAddress, powerDbm, ref length, portHandle);
-        }
-
-        internal static int SetCheckAnt(ref byte comAddress, byte checkAnt, int portHandle)
-        {
-            if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).SetCheckAnt(ref comAddress, checkAnt);
-            return NativeMethods.SetCheckAnt(ref comAddress, checkAnt, portHandle);
         }
 
         internal static int SetInventoryScanTime(ref byte comAddress, byte scanTime, int portHandle)
@@ -193,12 +162,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         {
             if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).SetAntennaMultiplexing4(ref comAddress, antMask);
             return NativeMethods.SetAntennaMultiplexing4(ref comAddress, antMask, portHandle);
-        }
-
-        internal static int SetAntennaMultiplexingExtended(ref byte comAddress, byte setOnce, byte antCfg1, byte antCfg2, int portHandle)
-        {
-            if (UseManagedX64Sdk) return ManagedSdk.Get(portHandle).SetAntennaMultiplexingExtended(ref comAddress, setOnce, antCfg1, antCfg2);
-            return NativeMethods.SetAntennaMultiplexingExtended(ref comAddress, setOnce, antCfg1, antCfg2, portHandle);
         }
 
         internal static int Inventory_G2(
@@ -244,11 +207,18 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             private static Assembly Assembly;
             private static Type ReaderType;
             private static Type ManagedCallbackType;
-            private static Type ManagedTagType;
+
+            private enum ManagedConnectionKind
+            {
+                None,
+                Com,
+                Tcp
+            }
 
             private readonly object _reader;
             private RFIDCallBack _callback;
             private Delegate _managedCallbackDelegate;
+            private ManagedConnectionKind _connectionKind;
 
             private ManagedSdk(int handle)
             {
@@ -258,6 +228,19 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             }
 
             public int Handle { get; private set; }
+
+            public static int SessionCount
+            {
+                get
+                {
+                    lock (Gate) return Sessions.Count;
+                }
+            }
+
+            public static string LoadedReaderTypeName
+            {
+                get { return ReaderType == null ? "<not-loaded>" : ReaderType.FullName; }
+            }
 
             public static ManagedSdk Create()
             {
@@ -283,14 +266,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 }
             }
 
-            public static void Remove(int handle)
-            {
-                lock (Gate)
-                {
-                    Sessions.Remove(handle);
-                }
-            }
-
             public static int Close(int handle)
             {
                 ManagedSdk session;
@@ -313,11 +288,10 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 Assembly = Assembly.LoadFrom(path);
                 ReaderType = FindTypeByFullNameOrName(Assembly, "UHF.UHFReader", "UHFReaderModule.UHFReader", "UHFReaderModule.Reader", "UHFReader");
                 ManagedCallbackType = FindTypeByFullNameOrName(Assembly, "UHF.RFIDCallBack", "UHFReaderModule.RFIDCallBack", "RFIDCallBack");
-                ManagedTagType = FindTypeByFullNameOrName(Assembly, "UHF.RFIDTag", "UHFReaderModule.RFIDTag", "RFIDTag");
                 if (ReaderType == null)
-                {
                     throw new TypeLoadException("Cannot find CF-E718 x64 reader type in " + path);
-                }
+                if (ManagedCallbackType == null)
+                    throw new TypeLoadException("Cannot find CF-E718 x64 RFID callback type in " + path);
             }
 
             private static Type FindTypeByFullNameOrName(Assembly assembly, params string[] candidates)
@@ -352,16 +326,18 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             public void InitRFIDCallBack(RFIDCallBack callback)
             {
+                if (callback == null) throw new ArgumentNullException("callback");
                 _callback = callback;
-                if (ManagedCallbackType == null) return;
                 var method = FindMethod("InitRFIDCallBack", 1);
-                if (method == null) return;
+                if (method == null)
+                    throw new MissingMethodException(ReaderType.FullName, "InitRFIDCallBack(1)");
                 _managedCallbackDelegate = CreateManagedCallbackDelegate();
                 method.Invoke(_reader, new object[] { _managedCallbackDelegate });
             }
 
             public int OpenNetPort(int port, string ipAddress, ref byte comAddress)
             {
+                _connectionKind = ManagedConnectionKind.Tcp;
                 var args = new object[] { port, ipAddress, comAddress };
                 var ret = InvokeInt("OpenNetPort", args);
                 comAddress = ToByte(args[2]);
@@ -370,33 +346,18 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             public int OpenComPort(int port, ref byte comAddress, byte baud)
             {
+                _connectionKind = ManagedConnectionKind.Com;
                 var args = new object[] { port, comAddress, baud };
                 var ret = InvokeInt("OpenComPort", args);
                 comAddress = ToByte(args[1]);
                 return ret;
             }
 
-            public int AutoOpenComPort(ref int port, ref byte comAddress, byte baud)
-            {
-                var args = new object[] { port, comAddress, baud };
-                var ret = InvokeInt("AutoOpenComPort", args);
-                port = ToInt(args[0]);
-                comAddress = ToByte(args[1]);
-                return ret;
-            }
 
             public int StopInventory(ref byte comAddress)
             {
                 var args = new object[] { comAddress };
                 var ret = InvokeInt("StopInventory", args);
-                comAddress = ToByte(args[0]);
-                return ret;
-            }
-
-            public int SetRfPower(ref byte comAddress, byte powerDbm)
-            {
-                var args = new object[] { comAddress, powerDbm };
-                var ret = InvokeInt("SetRfPower", args, typeof(byte));
                 comAddress = ToByte(args[0]);
                 return ret;
             }
@@ -413,57 +374,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             {
                 var args = new object[] { comAddress, moduleVersion };
                 var ret = InvokeInt("GetModuleVersion", args);
-                comAddress = ToByte(args[0]);
-                return ret;
-            }
-
-            public int GetReaderInformation(
-                ref byte comAddress,
-                byte[] versionInfo,
-                ref byte readerType,
-                ref byte trType,
-                ref byte maxFrequency,
-                ref byte minFrequency,
-                ref byte powerDbm,
-                ref byte scanTime,
-                ref byte antenna,
-                ref byte beepEnabled,
-                ref byte outputRep,
-                ref byte checkAntenna)
-            {
-                var args = new object[]
-                {
-                    comAddress, versionInfo, readerType, trType, maxFrequency, minFrequency, powerDbm,
-                    scanTime, antenna, beepEnabled, outputRep, checkAntenna
-                };
-                var ret = InvokeInt("GetReaderInformation", args);
-                comAddress = ToByte(args[0]);
-                readerType = ToByte(args[2]);
-                trType = ToByte(args[3]);
-                maxFrequency = ToByte(args[4]);
-                minFrequency = ToByte(args[5]);
-                powerDbm = ToByte(args[6]);
-                scanTime = ToByte(args[7]);
-                antenna = ToByte(args[8]);
-                beepEnabled = ToByte(args[9]);
-                outputRep = ToByte(args[10]);
-                checkAntenna = ToByte(args[11]);
-                return ret;
-            }
-
-            public int GetAntennaPower(ref byte comAddress, byte[] powerDbm, ref int length)
-            {
-                var args = new object[] { comAddress, powerDbm, length };
-                var ret = InvokeInt("GetAntennaPower", args);
-                comAddress = ToByte(args[0]);
-                length = ToInt(args[2]);
-                return ret;
-            }
-
-            public int SetCheckAnt(ref byte comAddress, byte checkAnt)
-            {
-                var args = new object[] { comAddress, checkAnt };
-                var ret = InvokeInt("SetCheckAnt", args);
                 comAddress = ToByte(args[0]);
                 return ret;
             }
@@ -495,14 +405,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             public int SetAntennaMultiplexing4(ref byte comAddress, byte antMask)
             {
                 var args = new object[] { comAddress, antMask };
-                var ret = InvokeInt("SetAntennaMultiplexing", args);
-                comAddress = ToByte(args[0]);
-                return ret;
-            }
-
-            public int SetAntennaMultiplexingExtended(ref byte comAddress, byte setOnce, byte antCfg1, byte antCfg2)
-            {
-                var args = new object[] { comAddress, setOnce, antCfg1, antCfg2 };
                 var ret = InvokeInt("SetAntennaMultiplexing", args);
                 comAddress = ToByte(args[0]);
                 return ret;
@@ -545,8 +447,21 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             private int CloseInternal()
             {
-                var method = FindMethod("CloseSpecComPort", 0) ?? FindMethod("CloseNetPort", 0) ?? FindMethod("CloseComPort", 0);
-                if (method == null) return 0;
+                MethodInfo method;
+                if (_connectionKind == ManagedConnectionKind.Tcp)
+                {
+                    method = FindMethod("CloseNetPort", 0) ?? FindMethod("CloseByTcp", 0);
+                }
+                else
+                {
+                    method = FindMethod("CloseSpecComPort", 0)
+                        ?? FindMethod("CloseComPort", 0)
+                        ?? FindMethod("CloseByCom", 0);
+                }
+
+                _connectionKind = ManagedConnectionKind.None;
+                if (method == null)
+                    throw new MissingMethodException(ReaderType.FullName, "Close connection method");
                 var value = method.Invoke(_reader, new object[0]);
                 return value == null ? 0 : Convert.ToInt32(value);
             }
@@ -693,48 +608,18 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int OpenComPort(int port, ref byte comAddress, byte baud, ref int portHandle);
 
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int AutoOpenComPort(ref int port, ref byte comAddress, byte baud, ref int portHandle);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int CloseSpecComPort(int port);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int CloseUSBPort(int portHandle);
-
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int StopInventory(ref byte comAddress, int portHandle);
-
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int SetRfPower(ref byte comAddress, byte powerDbm, int portHandle);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int GetSeriaNo(ref byte comAddress, byte[] serialNo, int portHandle);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int GetModuleVersion(ref byte comAddress, byte[] moduleVersion, int portHandle);
-
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int GetReaderInformation(
-                ref byte comAddress,
-                byte[] versionInfo,
-                ref byte readerType,
-                ref byte trType,
-                ref byte maxFrequency,
-                ref byte minFrequency,
-                ref byte powerDbm,
-                ref byte scanTime,
-                ref byte antenna,
-                ref byte beepEnabled,
-                ref byte outputRep,
-                ref byte checkAntenna,
-                int portHandle);
-
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int GetAntennaPower(ref byte comAddress, byte[] powerDbm, ref int length, int portHandle);
-
-            [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
-            internal static extern int SetCheckAnt(ref byte comAddress, byte checkAnt, int portHandle);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int SetInventoryScanTime(ref byte comAddress, byte scanTime, int portHandle);
@@ -747,9 +632,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
             [DllImport(DllName, EntryPoint = "SetAntennaMultiplexing", CallingConvention = CallingConvention.StdCall)]
             internal static extern int SetAntennaMultiplexing4(ref byte comAddress, byte antMask, int portHandle);
-
-            [DllImport(DllName, EntryPoint = "SetAntennaMultiplexing", CallingConvention = CallingConvention.StdCall)]
-            internal static extern int SetAntennaMultiplexingExtended(ref byte comAddress, byte setOnce, byte antCfg1, byte antCfg2, int portHandle);
 
             [DllImport(DllName, CallingConvention = CallingConvention.StdCall)]
             internal static extern int Inventory_G2(

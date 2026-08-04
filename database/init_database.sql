@@ -9,13 +9,14 @@ CREATE TABLE IF NOT EXISTS controller_reader (
     read_interval_ms    INTEGER NOT NULL DEFAULT 200,
     tid_start_address   INTEGER NOT NULL DEFAULT 2,
     tid_length          INTEGER NOT NULL DEFAULT 4,
-    ports_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     options_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS controller_reader_runtime_status (
     serial_number       VARCHAR(128) PRIMARY KEY,
+    detected_sdk_serial VARCHAR(128),
+    detected_endpoint   VARCHAR(256),
     driver_key          VARCHAR(64),
     model               VARCHAR(128),
     endpoint            VARCHAR(256),
@@ -27,6 +28,14 @@ CREATE TABLE IF NOT EXISTS controller_reader_runtime_status (
     ports_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS detected_sdk_serial VARCHAR(128);
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS detected_endpoint VARCHAR(256);
+
+CREATE INDEX IF NOT EXISTS ix_controller_reader_runtime_detected_serial
+    ON controller_reader_runtime_status(detected_sdk_serial);
 
 CREATE TABLE IF NOT EXISTS controller_parking_outbox (
     id                  BIGSERIAL PRIMARY KEY,

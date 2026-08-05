@@ -16,7 +16,8 @@
 4. `CloseComPort()` and `CloseNetPort()` close the connection owned by that object.
 5. `Inventory_G2` receives TID address, TID length, and TID flag per request.
 6. `StartInventory` and `StopInventory` are documented as Ex10-only fast-inventory commands.
-7. The four-port Reader antenna mask uses the two-argument `SetAntennaMultiplexing(ref byte, byte)` overload.
+7. Controller applies one Reader-wide `power_dbm` value through `SetRfPower` during startup or reconnect.
+8. Controller does not configure antenna topology or routing; `port_no` is reported from the SDK callback.
 
 ## Refactor decision
 
@@ -51,6 +52,8 @@ ReaderManager
 
 ## Commands deliberately not used
 
+- Per-port antenna configuration and antenna routing commands are not part of Controller runtime.
+- Reader-wide RF power remains supported through `SetRfPower(ref byte, byte)`.
 - `SetTIDParameter`: redundant because the required values are passed to `Inventory_G2`.
 - `StartInventory` / `StopInventory`: Ex10-only fast-inventory path.
 - `StopImmediately`: unnecessary for the normal synchronous request loop.

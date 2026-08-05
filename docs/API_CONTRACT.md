@@ -31,3 +31,9 @@ Controller sends actual SDK `serial_number`, `port_no`, `tid`, timestamp, and RS
 ## Lane Calibration
 
 Routes use `controller/lane-calibrations/*` and `lane_calibration_*` fields. While a calibration session is active, Controller forwards raw detections without filtering Readers or Reader Ports.
+
+## Reader acquisition ownership
+
+- `power_dbm` is a Reader-wide technical setting. Controller clamps it to 0-33 dBm for CF-E718 and applies it through `SetRfPower`.
+- `port_no` is raw SDK observation data and is forwarded unchanged.
+- Antenna topology and routing are owned by Edge/Server and are not configured by Controller.

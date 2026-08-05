@@ -1,4 +1,4 @@
-# NSP Gatekeeper Controller 1.4.12
+# NSP Gatekeeper Controller 1.4.13
 
 Windows Controller for NSP Reader acquisition and execution.
 
@@ -27,7 +27,7 @@ Controller does not decide whether a Reader is valid, assigned, managed, in the 
 
 ## CF-E718 SDK implementation
 
-Version 1.4.12 is aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
+Version 1.4.13 is aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
 
 The package states that:
 
@@ -74,14 +74,15 @@ OpenComPort / OpenNetPort
 GetSeriaNo
 GetModuleVersion
 SetInventoryScanTime
-SetAntennaMultiplexing
-SetAntennaPower
+SetRfPower
 InitRFIDCallBack
 Inventory_G2
 CloseComPort / CloseNetPort
 ```
 
 TID address and length are passed directly on every `Inventory_G2` request. `SetTIDParameter` is not required for this runtime path.
+
+Controller applies `power_dbm` once as Reader-wide RF power through `SetRfPower`. Controller does not configure antenna topology or routing. Hardware ports are polled only to acquire RFID observations, and `port_no` is taken from the SDK callback and forwarded unchanged.
 
 `StartInventory` and `StopInventory` are documented for Ex10-series fast inventory and are not used by the CF-E718 synchronous inventory loop. `StopImmediately` is also not required during normal close because each `Inventory_G2` request returns before the next request begins.
 

@@ -22,7 +22,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         private readonly Cfe718Options _options;
         private readonly Cfe718Inventory _inventory;
         private Thread _thread;
-        private int _currentPortNo;
         private bool _disposed;
         private ReaderStatus _status;
         private string _resolvedEndpoint;
@@ -177,7 +176,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                         {
                             if (_cts.IsCancellationRequested) break;
                             phase = "inventory_port_" + portNo.ToString(CultureInfo.InvariantCulture);
-                            Interlocked.Exchange(ref _currentPortNo, portNo);
                             var result = _inventory.Execute(session, ref comAddress, portNo);
                             if (UhfReader288Result.IsInventoryAccepted(result))
                             {
@@ -195,7 +193,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                                 "Inventory failed on every Reader Port. " + string.Join(" | ", failures));
 
                         if (failures.Count > 0) LogPartialPortFailures(failures, acceptedPorts);
-                        Interlocked.Exchange(ref _currentPortNo, 0);
                         Wait(_options.LoopDelayMs);
                     }
                 }
@@ -228,7 +225,6 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 }
                 finally
                 {
-                    Interlocked.Exchange(ref _currentPortNo, 0);
                     CloseSession(session, comPort);
                 }
 
@@ -342,9 +338,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 var tid = Clean(tag.Uid);
                 if (string.IsNullOrWhiteSpace(tid)) return;
 
-                var currentPortNo = Thread.VolatileRead(ref _currentPortNo);
-                var reportedPortNo = Cfe718Options.DecodeReportedPort(tag.Antenna);
-                var portNo = Cfe718Options.IsReaderPort(currentPortNo) ? currentPortNo : reportedPortNo;
+                var portNo = Cfe718Options.DecodeReportedPort(tag.Antenna);
                 if (!Cfe718Options.IsReaderPort(portNo))
                 {
                     if (_logger != null)
@@ -524,7 +518,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             if (string.Equals(phase, "read_sdk_identity", StringComparison.OrdinalIgnoreCase))
                 return "transport_opened_but_reader_identity_failed; check cable, power, baud and SDK compatibility";
             if (string.Equals(phase, "apply_reader_configuration", StringComparison.OrdinalIgnoreCase))
-                return "reader_configuration_sdk_command_failed; inspect power, antenna mask and scan time";
+                return "reader_configuration_sdk_command_failed; inspect Reader-wide RF power and inventory scan time";
             if (string.Equals(phase, "register_callback", StringComparison.OrdinalIgnoreCase))
                 return "reader_connected_but_callback_registration_failed; verify C# SDK callback signature";
             if (!string.IsNullOrWhiteSpace(phase)

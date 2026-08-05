@@ -74,18 +74,10 @@ namespace NSPGatekeeper.Controller.Readers.CFE718.Sdk
             return result;
         }
 
-        internal int SetAntennaPower(ref byte comAddress, byte[] powerDbm, int length)
+        internal int SetRfPower(ref byte comAddress, byte powerDbm)
         {
-            var args = new object[] { comAddress, powerDbm, length };
-            var result = InvokeInt("SetAntennaPower", args);
-            comAddress = ToByte(args[0]);
-            return result;
-        }
-
-        internal int SetAntennaMultiplexing(ref byte comAddress, byte antennaMask)
-        {
-            var args = new object[] { comAddress, antennaMask };
-            var result = InvokeInt("SetAntennaMultiplexing", args);
+            var args = new object[] { comAddress, powerDbm };
+            var result = InvokeInt("SetRfPower", args, typeof(byte));
             comAddress = ToByte(args[0]);
             return result;
         }
@@ -185,8 +177,13 @@ namespace NSPGatekeeper.Controller.Readers.CFE718.Sdk
 
         private int InvokeInt(string methodName, object[] args)
         {
+            return InvokeInt(methodName, args, null);
+        }
+
+        private int InvokeInt(string methodName, object[] args, Type preferredLastParameterType)
+        {
             ThrowIfDisposed();
-            var method = FindMethod(methodName, args.Length, null);
+            var method = FindMethod(methodName, args.Length, preferredLastParameterType);
             if (method == null)
                 throw new MissingMethodException(_readerType.FullName, methodName + "(" + args.Length + ")");
 

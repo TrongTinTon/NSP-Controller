@@ -1,4 +1,4 @@
-NSP Controller 1.4.12 validation scope
+NSP Controller 1.4.13 validation scope
 
 - Vendor C# package and UHFReader288.DLL manual V2.1 reviewed.
 - x86 and x64 UHFReader288.dll files are managed .NET assemblies.
@@ -12,3 +12,7 @@ NSP Controller 1.4.12 validation scope
 - SetTIDParameter, StartInventory, StopInventory and StopImmediately are not used in the synchronous CF-E718 path.
 - Controller discovers and reports physical Readers without business validation.
 - Static source/XML/package validation only; Windows MSBuild and physical Reader tests are still required.
+
+- Reader-wide power_dbm is applied through the scalar SetRfPower overload (0-33 dBm).
+- No per-port antenna power, antenna topology, or antenna routing command exists in Controller runtime.
+- port_no is sourced from the SDK callback and is not replaced with the acquisition-loop port.

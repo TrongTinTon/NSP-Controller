@@ -30,4 +30,4 @@
 
 ## Port rule
 
-Controller sends all raw detections produced by the Reader. `port_no` is evidence, not a Controller-side business filter. Edge decides whether that `port_no` belongs to a configured Parking or Lane Calibration flow.
+Controller sends all raw detections produced by the Reader. `port_no` is decoded only from the SDK-reported antenna/port field and forwarded as evidence, never replaced by the port requested by the acquisition loop. Edge decides whether that `port_no` belongs to a configured Parking or Lane Calibration flow.

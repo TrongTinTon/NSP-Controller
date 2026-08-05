@@ -105,6 +105,15 @@ namespace NSPGatekeeper.Controller.Readers.CFE718.Sdk
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Instance);
             return methods.Any(item => item.Name == "OpenComPort" && item.GetParameters().Length == 3)
                 && methods.Any(item => item.Name == "GetSeriaNo" && item.GetParameters().Length == 2)
+                && methods.Any(item =>
+                {
+                    if (item.Name != "SetRfPower") return false;
+                    var parameters = item.GetParameters();
+                    if (parameters.Length != 2) return false;
+                    var powerType = parameters[1].ParameterType;
+                    if (powerType.IsByRef) powerType = powerType.GetElementType();
+                    return powerType == typeof(byte);
+                })
                 && methods.Any(item => item.Name == "Inventory_G2" && item.GetParameters().Length == 19);
         }
     }

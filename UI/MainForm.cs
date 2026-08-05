@@ -30,6 +30,8 @@ namespace NSPGatekeeper.Controller.UI
         private readonly CheckBox _discovery = new CheckBox();
         private readonly Label _connectionStatus = new Label();
         private readonly Label _modeStatus = new Label();
+        private readonly Label _parkingLayoutStatus = new Label();
+        private readonly Label _laneCalibrationStatus = new Label();
         private readonly DataGridView _readerGrid = CreateGrid();
         private readonly Label _comPortStatus = new Label();
         private readonly DataGridView _laneCalibrationGrid = CreateGrid();
@@ -85,7 +87,7 @@ namespace NSPGatekeeper.Controller.UI
                 AutoSize = true,
                 Padding = new Padding(20),
                 ColumnCount = 2,
-                RowCount = 9
+                RowCount = 11
             };
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
             layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -104,7 +106,7 @@ namespace NSPGatekeeper.Controller.UI
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
             var save = new Button { Text = "Save", AutoSize = true };
             var test = new Button { Text = "Test Connection", AutoSize = true };
-            var sync = new Button { Text = "Sync Reader Config", AutoSize = true };
+            var sync = new Button { Text = "Sync Runtime Config", AutoSize = true };
             save.Click += delegate { SaveSettings(); };
             test.Click += async delegate { await RunUiAction(test, _runtime.TestConnectionOnce); };
             sync.Click += async delegate { await RunUiAction(sync, _runtime.PullReaderConfigOnce); };
@@ -124,14 +126,22 @@ namespace NSPGatekeeper.Controller.UI
             layout.Controls.Add(new Label { Text = "Runtime Mode", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
             layout.Controls.Add(_modeStatus, 1, 7);
 
+            ConfigureRuntimeContextLabel(_parkingLayoutStatus);
+            layout.Controls.Add(new Label { Text = "Parking Layout", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 8);
+            layout.Controls.Add(_parkingLayoutStatus, 1, 8);
+
+            ConfigureRuntimeContextLabel(_laneCalibrationStatus);
+            layout.Controls.Add(new Label { Text = "Lane Calibration", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 9);
+            layout.Controls.Add(_laneCalibrationStatus, 1, 9);
+
             var note = new Label
             {
                 AutoSize = true,
                 MaximumSize = new Size(780, 0),
-                Text = "Controller keeps only reader configuration, technical status and the raw RFID detection outbox. Business processing is handled by Edge."
+                Text = "Runtime context is reported by Edge. Controller only connects Readers, applies Reader-level technical settings and forwards raw RFID observations."
             };
-            layout.Controls.Add(new Label(), 0, 8);
-            layout.Controls.Add(note, 1, 8);
+            layout.Controls.Add(new Label(), 0, 10);
+            layout.Controls.Add(note, 1, 10);
             tab.Controls.Add(layout);
             return tab;
         }
@@ -284,6 +294,13 @@ namespace NSPGatekeeper.Controller.UI
             layout.Controls.Add(control, 1, row);
         }
 
+        private static void ConfigureRuntimeContextLabel(Label label)
+        {
+            label.AutoSize = true;
+            label.MaximumSize = new Size(780, 0);
+            label.ForeColor = Color.DimGray;
+        }
+
         private void LoadSettings()
         {
             _serverUrl.Text = _settings.CoreApiBaseUrl ?? string.Empty;
@@ -329,7 +346,10 @@ namespace NSPGatekeeper.Controller.UI
         {
             if (InvokeRequired) { BeginInvoke(new Action(RefreshRuntimeView)); return; }
             _connectionStatus.Text = (_runtime.Running ? "Running" : "Stopped") + " | " + _runtime.ConnectionMessage;
-            _modeStatus.Text = _runtime.Mode + (string.IsNullOrWhiteSpace(_runtime.LaneCalibrationCode) ? string.Empty : " | " + _runtime.LaneCalibrationCode);
+            var runtimeContext = _runtime.RuntimeContext ?? new ControllerRuntimeContextSnapshot();
+            _modeStatus.Text = runtimeContext.Mode ?? "Idle";
+            _parkingLayoutStatus.Text = FormatParkingLayouts(runtimeContext.ParkingLayouts);
+            _laneCalibrationStatus.Text = FormatLaneCalibration(runtimeContext.LaneCalibration);
             try
             {
                 RefreshReaderGrid();
@@ -352,6 +372,56 @@ namespace NSPGatekeeper.Controller.UI
             _laneCalibrationGrid.DataSource = detections;
         }
 
+
+        private static string FormatParkingLayouts(IList<ParkingLayoutRuntimeInfo> layouts)
+        {
+            var rows = (layouts ?? new List<ParkingLayoutRuntimeInfo>())
+                .Where(value => value != null)
+                .Select(value =>
+                {
+                    var identity = string.IsNullOrWhiteSpace(value.Name)
+                        ? value.Code
+                        : value.Code + " · " + value.Name;
+                    var state = string.IsNullOrWhiteSpace(value.State)
+                        ? string.Empty
+                        : " · " + ToTitle(value.State);
+                    var revision = value.PublishedRevision > 0
+                        ? " · R" + value.PublishedRevision
+                        : string.Empty;
+                    var lanes = (value.Lanes ?? new List<ParkingLaneRuntimeInfo>())
+                        .Where(lane => lane != null && !string.IsNullOrWhiteSpace(lane.Code))
+                        .Select(lane => string.IsNullOrWhiteSpace(lane.Name)
+                            ? lane.Code
+                            : lane.Code + " (" + lane.Name + ")")
+                        .ToList();
+                    return identity + state + revision
+                        + (lanes.Count == 0 ? string.Empty : " · Lanes: " + string.Join(", ", lanes));
+                })
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+            return rows.Count == 0 ? "None" : string.Join(Environment.NewLine, rows);
+        }
+
+        private static string FormatLaneCalibration(LaneCalibrationSessionConfig calibration)
+        {
+            if (calibration == null || !calibration.IsActiveForController
+                || string.IsNullOrWhiteSpace(calibration.LaneCalibrationCode))
+                return "None";
+            var status = string.IsNullOrWhiteSpace(calibration.Status)
+                ? "Running"
+                : ToTitle(calibration.Status);
+            return calibration.LaneCalibrationCode
+                + " · " + status
+                + " · R" + Math.Max(1, calibration.Revision)
+                + " · Readers: " + (calibration.Readers == null ? 0 : calibration.Readers.Count);
+        }
+
+        private static string ToTitle(string value)
+        {
+            value = (value ?? string.Empty).Trim();
+            if (value.Length == 0) return string.Empty;
+            return char.ToUpperInvariant(value[0]) + value.Substring(1).ToLowerInvariant();
+        }
 
         private void RefreshComPorts(bool force)
         {

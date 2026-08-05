@@ -37,6 +37,12 @@ ALTER TABLE controller_reader_runtime_status
 CREATE INDEX IF NOT EXISTS ix_controller_reader_runtime_detected_serial
     ON controller_reader_runtime_status(detected_sdk_serial);
 
+CREATE TABLE IF NOT EXISTS controller_runtime_context (
+    singleton_id         SMALLINT PRIMARY KEY CHECK (singleton_id = 1),
+    parking_layouts_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS controller_parking_outbox (
     id                  BIGSERIAL PRIMARY KEY,
     event_uid           VARCHAR(200) NOT NULL UNIQUE,

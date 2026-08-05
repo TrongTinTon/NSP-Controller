@@ -120,6 +120,40 @@ SELECT serial_number, driver_key, endpoint, port, enabled, config_hash,
             return result;
         }
 
+        public void SaveParkingLayouts(IList<ParkingLayoutRuntimeInfo> layouts)
+        {
+            const string sql = @"
+INSERT INTO controller_runtime_context(singleton_id, parking_layouts_json, updated_at)
+VALUES (1, CAST(@parking_layouts_json AS jsonb), NOW())
+ON CONFLICT (singleton_id) DO UPDATE SET
+ parking_layouts_json=EXCLUDED.parking_layouts_json,
+ updated_at=NOW();";
+            using (var conn = Open())
+            using (var cmd = new NpgsqlCommand(sql, conn))
+            {
+                cmd.Parameters.AddWithValue(
+                    "parking_layouts_json",
+                    JsonConvert.SerializeObject(layouts ?? new List<ParkingLayoutRuntimeInfo>()));
+                cmd.ExecuteNonQuery();
+            }
+        }
+
+        public IList<ParkingLayoutRuntimeInfo> GetParkingLayouts()
+        {
+            const string sql = @"
+SELECT parking_layouts_json::text
+  FROM controller_runtime_context
+ WHERE singleton_id=1";
+            using (var conn = Open())
+            using (var cmd = new NpgsqlCommand(sql, conn))
+            {
+                var value = cmd.ExecuteScalar();
+                if (value == null || value == DBNull.Value) return new List<ParkingLayoutRuntimeInfo>();
+                return JsonConvert.DeserializeObject<List<ParkingLayoutRuntimeInfo>>(Convert.ToString(value))
+                    ?? new List<ParkingLayoutRuntimeInfo>();
+            }
+        }
+
         public void UpdateLocalReaderConnection(string serialNumber, string driverKey, string endpoint, int port)
         {
             serialNumber = (serialNumber ?? string.Empty).Trim().ToUpperInvariant();

@@ -1,4 +1,4 @@
-# NSP Gatekeeper Controller 1.4.13
+# NSP Gatekeeper Controller 1.4.18
 
 Windows Controller for NSP Reader acquisition and execution.
 
@@ -27,7 +27,7 @@ Controller does not decide whether a Reader is valid, assigned, managed, in the 
 
 ## CF-E718 SDK implementation
 
-Version 1.4.13 is aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
+Version 1.4.18 is aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
 
 The package states that:
 
@@ -140,3 +140,31 @@ Controller does not resolve User, Vehicle, Parking Lane, Check-in, Check-out, or
 - vendor C# `UHFReader288.dll`
 
 Build and hardware integration tests must be run on Windows with the physical CF-E718 Reader.
+
+
+## Controller Runtime Context UI
+
+The Controller tab shows the actual runtime context supplied by Edge: `Idle`, `Parking Layout`, or `Lane Calibration`. Parking Layout rows include code, name, state, published revision and the lanes assigned to this Controller. Lane Calibration shows code, status, revision and Reader count. The Controller does not evaluate or own this business context.
+
+## Lane Calibration Ready Runtime
+
+A Lane Calibration session is active for Controller UI and acquisition when `status` is `ready` or `running`. Terminal statuses (`draft`, `completed`, `failed`, `cancelled`) are authoritative. `desired_state=running` is used only as a compatibility fallback when an older Edge response omits `status`.
+
+Lane Calibration event pushes now log the Edge acknowledgement counters (`received`, `stored`, `duplicates`, `ignored`, `rejected`). This distinguishes transport delivery from Edge business acceptance and prevents an HTTP 200 response from being reported as “stored” without evidence.
+
+## Runtime routing invariant
+
+A connected Reader is only a technical acquisition source. It does not imply that
+a business runtime is active. Routing is exclusive:
+
+- `Lane Calibration` → Lane Calibration events only.
+- `Parking Layout` → Parking detections only.
+- `Idle` → detections remain visible locally and are not queued or pushed.
+
+The Parking push worker is disabled outside Parking runtime. Core API response parsing
+supports both direct payloads and nested T4 Core API envelopes.
+
+
+## Lane Calibration acquisition continuity (1.4.18)
+
+Lane Calibration Reader-wide power and scan interval changes are applied on the existing SDK session between inventory cycles. The physical Reader worker and RFID callback are not replaced for these changes. Logs now distinguish `lane-calibration-route`, durable local persistence (`lane-calibration-outbox`), and Edge delivery (`lane-calibration-push`).

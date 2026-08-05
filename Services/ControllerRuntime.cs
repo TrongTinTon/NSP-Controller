@@ -25,6 +25,7 @@ namespace NSPGatekeeper.Controller.Services
         private bool _running;
         private bool _readerConfigSynchronized;
         private string _connectionMessage = "stopped";
+        private string _lastLaneCalibrationPullSignature = string.Empty;
 
         public ControllerRuntime(AppSettings settings, LocalStore store, CoreApiClient coreApi, ReaderManager readers, FileLogger logger)
         {
@@ -39,6 +40,7 @@ namespace NSPGatekeeper.Controller.Services
         public string ConnectionMessage { get { lock (_gate) return _connectionMessage; } }
         public string Mode { get { return _readers.CurrentMode; } }
         public string LaneCalibrationCode { get { return _readers.CurrentLaneCalibrationCode; } }
+        public ControllerRuntimeContextSnapshot RuntimeContext { get { return _readers.GetRuntimeContextSnapshot(); } }
 
         public event Action StateChanged;
 
@@ -162,10 +164,16 @@ namespace NSPGatekeeper.Controller.Services
 
         private void SynchronizeReaderConfigurationLocked()
         {
-            var configs = _coreApi.PullReaderConfigs();
-            _readers.ApplyServerConfiguration(configs);
+            var snapshot = _coreApi.PullControllerRuntimeConfiguration();
+            _readers.ApplyServerConfiguration(snapshot);
             _readerConfigSynchronized = true;
-            if (_logger != null) _logger.Info("reader-config", "Reader configuration synchronized", "count=" + configs.Count);
+            if (_logger != null)
+                _logger.Info(
+                    "reader-config",
+                    "Controller runtime configuration synchronized",
+                    "reader_count=" + snapshot.Devices.Count
+                    + "; parking_layout_count=" + snapshot.ParkingLayouts.Count);
+            NotifyStateChanged();
         }
 
         public void ReportReaderStatusOnce()
@@ -175,6 +183,11 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PushDetectionsOnce()
         {
+            // Parking outbox may contain legitimate unsent records from an earlier
+            // Parking runtime. Do not transmit it while Controller is Idle or while
+            // Lane Calibration owns acquisition routing.
+            if (!_readers.IsParkingRuntimeActive) return;
+
             var batch = _store.GetPendingDetections(_settings.DetectionBatchSize);
             if (batch.Count == 0) return;
             var ids = batch.Select(x => x.Id).ToList();
@@ -202,17 +215,50 @@ namespace NSPGatekeeper.Controller.Services
         public void PullLaneCalibrationOnce()
         {
             var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
-            if (config == null || !config.Available || !config.IsRunningDesired)
+            LogLaneCalibrationPullState(config);
+            if (config == null || !config.Available || !config.IsActiveForController)
             {
                 _readers.ClearLaneCalibration(config == null ? "no_session" : (config.Status ?? "stopped"));
                 NotifyStateChanged();
                 return;
             }
 
+            // Ready and running sessions are both active Controller runtime contexts.
             // Controller applies acquisition parameters when a discovered SDK Serial matches.
             // It does not decide whether a Reader belongs to the Lane Calibration scope.
             _readers.ApplyLaneCalibrationConfiguration(config);
             NotifyStateChanged();
+        }
+
+        private void LogLaneCalibrationPullState(LaneCalibrationSessionConfig config)
+        {
+            var signature = config == null
+                ? "null"
+                : string.Join("|", new[]
+                {
+                    config.Available ? "available" : "unavailable",
+                    config.LaneCalibrationCode ?? string.Empty,
+                    config.Status ?? string.Empty,
+                    config.DesiredState ?? string.Empty,
+                    config.Reason ?? string.Empty,
+                    config.Revision.ToString(),
+                    config.IsActiveForController ? "active" : "inactive",
+                });
+            if (string.Equals(signature, _lastLaneCalibrationPullSignature, StringComparison.Ordinal)) return;
+            _lastLaneCalibrationPullSignature = signature;
+            if (_logger == null) return;
+            _logger.Info(
+                "lane-calibration-pull",
+                "Lane Calibration runtime state changed",
+                config == null
+                    ? "available=false; reason=null_response"
+                    : "available=" + config.Available
+                      + "; code=" + (config.LaneCalibrationCode ?? string.Empty)
+                      + "; status=" + (config.Status ?? string.Empty)
+                      + "; desired_state=" + (config.DesiredState ?? string.Empty)
+                      + "; reason=" + (config.Reason ?? string.Empty)
+                      + "; revision=" + config.Revision
+                      + "; active_for_controller=" + config.IsActiveForController);
         }
 
         public void PushLaneCalibrationEventsOnce()
@@ -229,15 +275,36 @@ namespace NSPGatekeeper.Controller.Services
 
             try
             {
-                _coreApi.PushLaneCalibrationEvents(
+                var ack = _coreApi.PushLaneCalibrationEvents(
                     laneCalibrationCode,
                     sameSession.Select(x => x.Event).ToList());
                 _store.MarkLaneCalibrationSent(ids);
                 if (_logger != null)
-                    _logger.Info(
-                        "lane-calibration-push",
-                        "Lane Calibration raw event batch acknowledged",
-                        "code=" + laneCalibrationCode + "; count=" + ids.Count + "; http=200");
+                {
+                    var detail = "code=" + laneCalibrationCode
+                        + "; sent=" + ids.Count
+                        + "; edge_received=" + ack.Received
+                        + "; edge_stored=" + ack.Stored
+                        + "; edge_duplicates=" + ack.Duplicates
+                        + "; edge_ignored=" + ack.Ignored
+                        + "; edge_rejected=" + ack.Rejected
+                        + "; http=200";
+                    if (ack.Stored < 0)
+                        _logger.Warn(
+                            "lane-calibration-push",
+                            "Lane Calibration batch acknowledged by an older Edge without storage counters",
+                            detail);
+                    else if (ack.Rejected > 0 || ack.Ignored > 0)
+                        _logger.Warn(
+                            "lane-calibration-push",
+                            "Lane Calibration batch acknowledged with Edge-side decisions",
+                            detail);
+                    else
+                        _logger.Info(
+                            "lane-calibration-push",
+                            "Lane Calibration raw event batch stored by Edge",
+                            detail);
+                }
             }
             catch (Exception ex)
             {

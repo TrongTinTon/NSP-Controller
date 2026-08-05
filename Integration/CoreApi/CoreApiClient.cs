@@ -141,20 +141,20 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return PostAuthenticated("heartbeat", new JObject { ["controller_code"] = _settings.ControllerCode });
         }
 
-        public IList<ReaderDeviceConfig> PullReaderConfigs()
+        public ControllerRuntimeConfigurationSnapshot PullControllerRuntimeConfiguration()
         {
             var response = PostAuthenticated("controller/device-config/pull", new JObject
             {
                 ["controller_code"] = _settings.ControllerCode
             });
 
-            var data = response["data"] as JObject;
-            var devices = data == null ? null : data["devices"] as JArray;
-            if (devices == null) return new List<ReaderDeviceConfig>();
+            var snapshot = new ControllerRuntimeConfigurationSnapshot();
+            var data = ExtractBusinessData(response, "Controller runtime configuration");
+            if (data == null) return snapshot;
 
-            var result = new List<ReaderDeviceConfig>();
+            var devices = data["devices"] as JArray;
             var seenSerials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var token in devices.OfType<JObject>())
+            foreach (var token in (devices ?? new JArray()).OfType<JObject>())
             {
                 var serial = Clean((string)token["serial_number"]);
                 if (string.IsNullOrWhiteSpace(serial))
@@ -174,18 +174,46 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     SerialNumber = serial,
                     Enabled = true,
-                    PowerDbm = Clamp(readerParameters.Value<int?>("power_dbm") ?? 30, 0, 40),
+                    PowerDbm = Clamp(readerParameters.Value<int?>("power_dbm") ?? 30, 0, 33),
                     ReadIntervalMs = Clamp(readerParameters.Value<int?>("read_interval_ms") ?? 200, 1, 60000),
                     TidStartAddress = Math.Max(0, readerParameters.Value<int?>("tid_start_address") ?? 2),
                     TidLength = Math.Max(1, readerParameters.Value<int?>("tid_length") ?? 4)
                 };
                 config.ConfigHash = ReaderRuntimeConfigHash(config);
 
-                // Server owns the business Port configuration. Controller intentionally
-                // ignores token["ports"] and sends every raw detection with its port_no.
-                result.Add(config);
+                // Server owns Reader Port topology. Controller ignores token["ports"]
+                // and forwards the raw port_no reported by the Reader SDK.
+                snapshot.Devices.Add(config);
             }
-            return result;
+
+            var layouts = data["parking_layouts"] as JArray;
+            var seenLayouts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var token in (layouts ?? new JArray()).OfType<JObject>())
+            {
+                var code = Clean((string)token["parking_area_code"]);
+                if (string.IsNullOrWhiteSpace(code) || !seenLayouts.Add(code)) continue;
+                var layout = new ParkingLayoutRuntimeInfo
+                {
+                    Code = code.ToUpperInvariant(),
+                    Name = Clean((string)token["parking_area_name"]),
+                    State = Clean((string)token["state"]),
+                    PublishedRevision = Math.Max(0, token.Value<int?>("published_revision") ?? 0),
+                };
+                var lanes = token["lanes"] as JArray;
+                foreach (var laneToken in (lanes ?? new JArray()).OfType<JObject>())
+                {
+                    var laneCode = Clean((string)laneToken["lane_code"]);
+                    if (string.IsNullOrWhiteSpace(laneCode)) continue;
+                    layout.Lanes.Add(new ParkingLaneRuntimeInfo
+                    {
+                        Code = laneCode.ToUpperInvariant(),
+                        Name = Clean((string)laneToken["lane_name"]),
+                    });
+                }
+                snapshot.ParkingLayouts.Add(layout);
+            }
+
+            return snapshot;
         }
 
         public void ReportReaderStatus(IList<ReaderStatus> statuses)
@@ -247,11 +275,16 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 ["current_lane_calibration_code"] = currentLaneCalibrationCode ?? string.Empty
             });
 
-            var payload = response["data"] as JObject;
+            var payload = ExtractBusinessData(response, "Lane Calibration pull");
             if (payload == null) return new LaneCalibrationSessionConfig { Available = false };
 
             var available = payload.Value<bool?>("lane_calibration_available") ?? false;
-            if (!available) return new LaneCalibrationSessionConfig { Available = false };
+            if (!available)
+                return new LaneCalibrationSessionConfig
+                {
+                    Available = false,
+                    Reason = Clean((string)payload["reason"]),
+                };
 
             var config = new LaneCalibrationSessionConfig
             {
@@ -285,9 +318,10 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return config;
         }
 
-        public void PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
+        public LaneCalibrationPushAck PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
         {
-            if (events == null || events.Count == 0) return;
+            if (events == null || events.Count == 0)
+                return new LaneCalibrationPushAck { LaneCalibrationCode = laneCalibrationCode };
             var items = new JArray();
             foreach (var item in events)
             {
@@ -306,12 +340,44 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 items.Add(payload);
             }
 
-            PostAuthenticated(LaneCalibrationEventsRoute, new JObject
+            var response = PostAuthenticated(LaneCalibrationEventsRoute, new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
                 ["lane_calibration_code"] = laneCalibrationCode,
                 ["events"] = items
             });
+
+            var data = ExtractBusinessData(response, "Lane Calibration Edge acknowledgement");
+            if (data == null || data["received"] == null)
+            {
+                // Backward compatibility with an older Edge that returned only
+                // a transport-level HTTP 200 acknowledgement.
+                return new LaneCalibrationPushAck
+                {
+                    LaneCalibrationCode = laneCalibrationCode,
+                    Received = events.Count,
+                    Stored = -1,
+                    Duplicates = -1,
+                    Ignored = -1,
+                    Rejected = -1,
+                };
+            }
+
+            var ack = new LaneCalibrationPushAck
+            {
+                LaneCalibrationCode = Clean((string)data["lane_calibration_code"]) ?? laneCalibrationCode,
+                Received = data.Value<int?>("received") ?? -1,
+                Stored = data.Value<int?>("stored") ?? -1,
+                Duplicates = data.Value<int?>("duplicates") ?? 0,
+                Ignored = data.Value<int?>("ignored") ?? 0,
+                Rejected = data.Value<int?>("rejected") ?? 0,
+            };
+            if (ack.Received >= 0 && ack.Received != events.Count)
+                throw new InvalidOperationException(
+                    "Lane Calibration Edge acknowledgement count mismatch. sent="
+                    + events.Count.ToString(CultureInfo.InvariantCulture)
+                    + "; received=" + ack.Received.ToString(CultureInfo.InvariantCulture));
+            return ack;
         }
 
         public void ReportLaneCalibrationStatus(string laneCalibrationCode, string status, DateTime occurredAtUtc, string message)
@@ -619,13 +685,47 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
         private void LogBatchFailures(string category, JObject response)
         {
             if (_logger == null || response == null) return;
-            var data = response["data"] as JObject;
+            var data = ExtractBusinessData(response, category + " acknowledgement");
             var failed = data == null ? 0 : data.Value<int?>("failed") ?? 0;
             if (failed > 0)
                 _logger.Warn(category, "Server rejected one or more batch items",
                     "failed=" + failed.ToString(CultureInfo.InvariantCulture));
         }
 
+
+        private static JObject ExtractBusinessData(JObject response, string operation)
+        {
+            if (response == null) return null;
+
+            var current = response;
+            for (var depth = 0; depth < 4 && current != null; depth++)
+            {
+                var success = current.Value<bool?>("success");
+                if (success.HasValue && !success.Value)
+                {
+                    var message = Clean((string)current["message"])
+                        ?? Clean((string)current["error"])
+                        ?? "request failed";
+                    throw new InvalidOperationException(operation + " reported success=false: " + message);
+                }
+
+                var result = current["result"] as JObject;
+                if (result != null)
+                {
+                    current = result;
+                    continue;
+                }
+
+                var data = current["data"] as JObject;
+                if (data == null) return current;
+
+                // T4 Core API deployments may expose either transport data directly
+                // or a canonical { success, data } envelope inside transport data.
+                // Continue unwrapping both forms until the actual business payload.
+                current = data;
+            }
+            return current;
+        }
 
         private static string ReaderRuntimeConfigHash(ReaderDeviceConfig config)
         {

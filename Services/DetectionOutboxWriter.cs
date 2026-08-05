@@ -128,6 +128,13 @@ namespace NSPGatekeeper.Controller.Services
                 try
                 {
                     _store.EnqueueLaneCalibrationEvents(batch);
+                    if (_logger != null)
+                        _logger.Info(
+                            "lane-calibration-outbox",
+                            "Lane Calibration events persisted locally",
+                            "count=" + batch.Count
+                            + "; code=" + (batch[0].LaneCalibrationCode ?? string.Empty)
+                            + "; durable=true");
                     return;
                 }
                 catch (Exception ex)

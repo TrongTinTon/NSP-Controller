@@ -25,6 +25,9 @@ namespace NSPGatekeeper.Controller.Services
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private readonly Queue<RfidDetection> _recentDetections = new Queue<RfidDetection>();
         private LaneCalibrationSessionConfig _laneCalibration;
+        private IList<ParkingLayoutRuntimeInfo> _parkingLayouts = new List<ParkingLayoutRuntimeInfo>();
+        private DateTime _lastNoRuntimeDetectionLogUtc = DateTime.MinValue;
+        private DateTime _lastLaneCalibrationRouteLogUtc = DateTime.MinValue;
         private bool _disposed;
 
         public ReaderManager(
@@ -52,24 +55,66 @@ namespace NSPGatekeeper.Controller.Services
 
         public string CurrentMode
         {
+            get { return GetRuntimeContextSnapshot().Mode; }
+        }
+
+        public bool IsParkingRuntimeActive
+        {
             get
             {
-                lock (_gate)
-                    return _laneCalibration != null && _laneCalibration.IsRunningDesired
+                lock (_gate) return HasActiveParkingRuntime(_parkingLayouts);
+            }
+        }
+
+        public bool IsLaneCalibrationRuntimeActive
+        {
+            get
+            {
+                lock (_gate) return _laneCalibration != null && _laneCalibration.IsActiveForController;
+            }
+        }
+
+        public ControllerRuntimeContextSnapshot GetRuntimeContextSnapshot()
+        {
+            lock (_gate)
+            {
+                var calibration = CloneLaneCalibration(_laneCalibration);
+                var layouts = (_parkingLayouts ?? new List<ParkingLayoutRuntimeInfo>())
+                    .Select(CloneParkingLayout)
+                    .OrderBy(value => value.Code, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                return new ControllerRuntimeContextSnapshot
+                {
+                    Mode = calibration != null && calibration.IsActiveForController
                         ? "Lane Calibration"
-                        : "Parking";
+                        : (HasActiveParkingRuntime(layouts) ? "Parking Layout" : "Idle"),
+                    ParkingLayouts = layouts,
+                    LaneCalibration = calibration,
+                };
             }
         }
 
         public void StartCachedConfiguration()
         {
             ReplaceServerConfigurations(_store.GetReaderConfigs(), false);
+            lock (_gate)
+            {
+                _parkingLayouts = (_store.GetParkingLayouts() ?? new List<ParkingLayoutRuntimeInfo>())
+                    .Select(CloneParkingLayout)
+                    .ToList();
+            }
             DiscoverReadersOnce();
         }
 
-        public void ApplyServerConfiguration(IList<ReaderDeviceConfig> serverConfigs)
+        public void ApplyServerConfiguration(ControllerRuntimeConfigurationSnapshot snapshot)
         {
-            ReplaceServerConfigurations(serverConfigs, true);
+            snapshot = snapshot ?? new ControllerRuntimeConfigurationSnapshot();
+            ReplaceServerConfigurations(snapshot.Devices, true);
+            var parkingLayouts = (snapshot.ParkingLayouts ?? new List<ParkingLayoutRuntimeInfo>())
+                .Select(CloneParkingLayout)
+                .ToList();
+            lock (_gate) _parkingLayouts = parkingLayouts;
+            _store.SaveParkingLayouts(parkingLayouts);
             ReapplyRuntimeSettings();
             DiscoverReadersOnce();
         }
@@ -98,7 +143,7 @@ namespace NSPGatekeeper.Controller.Services
 
         public void ApplyLaneCalibrationConfiguration(LaneCalibrationSessionConfig config)
         {
-            if (config == null || !config.IsRunningDesired || string.IsNullOrWhiteSpace(config.LaneCalibrationCode))
+            if (config == null || !config.IsActiveForController || string.IsNullOrWhiteSpace(config.LaneCalibrationCode))
             {
                 ClearLaneCalibration("server_stopped");
                 return;
@@ -240,17 +285,58 @@ namespace NSPGatekeeper.Controller.Services
 
         private void ReapplyRuntimeSettings()
         {
-            List<RuntimeStopRequest> restart;
+            var inPlace = new List<RuntimeUpdateRequest>();
+            var restart = new List<RuntimeStopRequest>();
+
             lock (_gate)
             {
-                restart = _runtimes.Select(pair =>
+                foreach (var pair in _runtimes.ToList())
                 {
                     var next = EffectiveConfigLocked(pair.Key, pair.Value.Config.DriverKey, pair.Value.Config.Endpoint);
-                    return RestartReason(pair.Value.Config, next) == null
-                        ? null
-                        : new RuntimeStopRequest(pair.Key, pair.Value, next);
-                }).Where(value => value != null).ToList();
-                foreach (var item in restart) _runtimes.Remove(item.SerialNumber);
+                    if (RestartReason(pair.Value.Config, next) == null) continue;
+
+                    if (CanApplyInPlace(pair.Value.Config, next))
+                        inPlace.Add(new RuntimeUpdateRequest(pair.Key, pair.Value, next));
+                    else
+                    {
+                        restart.Add(new RuntimeStopRequest(pair.Key, pair.Value, next));
+                        _runtimes.Remove(pair.Key);
+                    }
+                }
+            }
+
+            foreach (var item in inPlace)
+            {
+                bool applied = false;
+                try { applied = item.Handle.Runtime.TryApplyConfiguration(item.NextConfig); }
+                catch (Exception ex)
+                {
+                    if (_logger != null)
+                        _logger.Error("reader-runtime", "In-place Reader parameter update failed", ex,
+                            "serial=" + item.SerialNumber);
+                }
+
+                if (applied)
+                {
+                    if (_logger != null)
+                        _logger.Info(
+                            "reader-runtime",
+                            "Reader parameters scheduled without restarting RFID acquisition",
+                            "serial=" + item.SerialNumber
+                            + "; power_dbm=" + item.NextConfig.PowerDbm
+                            + "; read_interval_ms=" + item.NextConfig.ReadIntervalMs
+                            + "; callback_preserved=true");
+                    continue;
+                }
+
+                lock (_gate)
+                {
+                    RuntimeHandle current;
+                    if (_runtimes.TryGetValue(item.SerialNumber, out current)
+                        && object.ReferenceEquals(current, item.Handle))
+                        _runtimes.Remove(item.SerialNumber);
+                }
+                restart.Add(new RuntimeStopRequest(item.SerialNumber, item.Handle, item.NextConfig));
             }
 
             foreach (var item in restart)
@@ -334,7 +420,7 @@ namespace NSPGatekeeper.Controller.Services
             config.Options["connection"] = "com";
 
             LaneCalibrationReaderConfig calibrationReader = null;
-            if (_laneCalibration != null && _laneCalibration.IsRunningDesired)
+            if (_laneCalibration != null && _laneCalibration.IsActiveForController)
                 calibrationReader = _laneCalibration.Reader(serial);
             if (calibrationReader != null)
             {
@@ -361,34 +447,91 @@ namespace NSPGatekeeper.Controller.Services
 
             LaneCalibrationSessionConfig calibration;
             ReaderDeviceConfig applied = null;
+            bool parkingRuntimeActive;
             lock (_gate)
             {
                 calibration = _laneCalibration;
+                parkingRuntimeActive = HasActiveParkingRuntime(_parkingLayouts);
                 RuntimeHandle handle;
                 if (_runtimes.TryGetValue(detection.SerialNumber, out handle)) applied = handle.Config;
                 _recentDetections.Enqueue(detection);
                 while (_recentDetections.Count > 500) _recentDetections.Dequeue();
             }
 
-            if (calibration == null || !calibration.IsRunningDesired)
+            if (calibration != null && calibration.IsActiveForController)
+            {
+                var calibrationEvent = new LaneCalibrationEvent
+                {
+                    EventUid = BuildEventUid("CAL"),
+                    LaneCalibrationCode = calibration.LaneCalibrationCode,
+                    Revision = calibration.Revision,
+                    PowerDbm = applied == null ? 0 : applied.PowerDbm,
+                    ReadIntervalMs = applied == null ? 200 : applied.ReadIntervalMs,
+                    SerialNumber = detection.SerialNumber,
+                    PortNo = detection.PortNo,
+                    Tid = detection.Tid,
+                    RssiDbm = detection.RssiDbm,
+                    ReadAtUtc = detection.DetectedAtUtc,
+                };
+                _outbox.EnqueueLaneCalibration(calibrationEvent);
+                LogLaneCalibrationRouted(calibrationEvent);
+                return;
+            }
+
+            if (parkingRuntimeActive)
             {
                 _outbox.EnqueueParking(detection);
                 return;
             }
 
-            _outbox.EnqueueLaneCalibration(new LaneCalibrationEvent
+            LogDetectionWithoutRuntime(detection);
+        }
+
+        private void LogLaneCalibrationRouted(LaneCalibrationEvent evt)
+        {
+            if (_logger == null || evt == null) return;
+            var now = DateTime.UtcNow;
+            lock (_gate)
             {
-                EventUid = BuildEventUid("CAL"),
-                LaneCalibrationCode = calibration.LaneCalibrationCode,
-                Revision = calibration.Revision,
-                PowerDbm = applied == null ? 0 : applied.PowerDbm,
-                ReadIntervalMs = applied == null ? 200 : applied.ReadIntervalMs,
-                SerialNumber = detection.SerialNumber,
-                PortNo = detection.PortNo,
-                Tid = detection.Tid,
-                RssiDbm = detection.RssiDbm,
-                ReadAtUtc = detection.DetectedAtUtc,
-            });
+                if (now - _lastLaneCalibrationRouteLogUtc < TimeSpan.FromSeconds(1)) return;
+                _lastLaneCalibrationRouteLogUtc = now;
+            }
+            _logger.Info(
+                "lane-calibration-route",
+                "RFID detection routed to Lane Calibration outbox",
+                "code=" + evt.LaneCalibrationCode
+                + "; revision=" + evt.Revision
+                + "; serial=" + evt.SerialNumber
+                + "; port_no=" + evt.PortNo
+                + "; tid=" + evt.Tid);
+        }
+
+        private void LogDetectionWithoutRuntime(RfidDetection detection)
+        {
+            if (_logger == null) return;
+            var now = DateTime.UtcNow;
+            lock (_gate)
+            {
+                if (now - _lastNoRuntimeDetectionLogUtc < TimeSpan.FromSeconds(30)) return;
+                _lastNoRuntimeDetectionLogUtc = now;
+            }
+            _logger.Warn(
+                "rfid-routing",
+                "RFID detection observed but no active runtime context is assigned; event was not queued",
+                "serial=" + detection.SerialNumber
+                + "; port_no=" + detection.PortNo
+                + "; tid=" + detection.Tid
+                + "; runtime_mode=Idle");
+        }
+
+        private static bool HasActiveParkingRuntime(IEnumerable<ParkingLayoutRuntimeInfo> layouts)
+        {
+            return (layouts ?? Enumerable.Empty<ParkingLayoutRuntimeInfo>()).Any(value =>
+                value != null
+                && !string.IsNullOrWhiteSpace(value.Code)
+                && (string.Equals(value.State, "operational", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(value.State, "maintenance", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(value.State, "blocked", StringComparison.OrdinalIgnoreCase)));
         }
 
         private void OnStatus(ReaderStatus status)
@@ -463,6 +606,44 @@ namespace NSPGatekeeper.Controller.Services
                     "serial=" + serial + "; reason=" + reason);
         }
 
+        private static ParkingLayoutRuntimeInfo CloneParkingLayout(ParkingLayoutRuntimeInfo source)
+        {
+            if (source == null) return new ParkingLayoutRuntimeInfo();
+            return new ParkingLayoutRuntimeInfo
+            {
+                Code = source.Code,
+                Name = source.Name,
+                State = source.State,
+                PublishedRevision = source.PublishedRevision,
+                Lanes = (source.Lanes ?? new List<ParkingLaneRuntimeInfo>())
+                    .Where(value => value != null)
+                    .Select(value => new ParkingLaneRuntimeInfo { Code = value.Code, Name = value.Name })
+                    .ToList(),
+            };
+        }
+
+        private static LaneCalibrationSessionConfig CloneLaneCalibration(LaneCalibrationSessionConfig source)
+        {
+            if (source == null) return null;
+            return new LaneCalibrationSessionConfig
+            {
+                Available = source.Available,
+                LaneCalibrationCode = source.LaneCalibrationCode,
+                Status = source.Status,
+                DesiredState = source.DesiredState,
+                Reason = source.Reason,
+                Revision = source.Revision,
+                Readers = (source.Readers ?? new List<LaneCalibrationReaderConfig>())
+                    .Where(value => value != null)
+                    .Select(value => new LaneCalibrationReaderConfig
+                    {
+                        SerialNumber = value.SerialNumber,
+                        PowerDbm = value.PowerDbm,
+                        ReadIntervalMs = value.ReadIntervalMs,
+                    }).ToList(),
+            };
+        }
+
         private static ReaderDeviceConfig CloneReaderConfig(ReaderDeviceConfig source)
         {
             if (source == null) return new ReaderDeviceConfig();
@@ -483,6 +664,17 @@ namespace NSPGatekeeper.Controller.Services
             if (source.Options != null)
                 foreach (var pair in source.Options) clone.Options[pair.Key] = pair.Value;
             return clone;
+        }
+
+        private static bool CanApplyInPlace(ReaderDeviceConfig current, ReaderDeviceConfig next)
+        {
+            if (current == null || next == null) return false;
+            return string.Equals(NormalizeSerial(current.SerialNumber), NormalizeSerial(next.SerialNumber), StringComparison.OrdinalIgnoreCase)
+                && string.Equals(current.DriverKey, next.DriverKey, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(NormalizeEndpoint(current.Endpoint), NormalizeEndpoint(next.Endpoint), StringComparison.OrdinalIgnoreCase)
+                && current.Port == next.Port
+                && current.TidStartAddress == next.TidStartAddress
+                && current.TidLength == next.TidLength;
         }
 
         private static string RuntimeSignature(ReaderDeviceConfig config)
@@ -566,6 +758,19 @@ namespace NSPGatekeeper.Controller.Services
                 _runtimes.Clear();
             }
             foreach (var pair in handles) StopRuntimeHandle(pair.Key, pair.Value, "controller_stopped");
+        }
+
+        private sealed class RuntimeUpdateRequest
+        {
+            public RuntimeUpdateRequest(string serialNumber, RuntimeHandle handle, ReaderDeviceConfig nextConfig)
+            {
+                SerialNumber = serialNumber;
+                Handle = handle;
+                NextConfig = nextConfig;
+            }
+            public string SerialNumber { get; private set; }
+            public RuntimeHandle Handle { get; private set; }
+            public ReaderDeviceConfig NextConfig { get; private set; }
         }
 
         private sealed class RuntimeStopRequest

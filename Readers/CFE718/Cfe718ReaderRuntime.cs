@@ -16,6 +16,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         private readonly FileLogger _logger;
         private readonly object _statusGate = new object();
         private readonly object _detectionLogGate = new object();
+        private readonly object _configurationGate = new object();
         private readonly Dictionary<string, DateTime> _detectionLogAt = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private readonly ReaderDeviceConfig _config;
@@ -30,6 +31,8 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         private DateTime _lastFullFailureAtUtc;
         private string _lastPortFailureSignature;
         private DateTime _lastPortFailureLogAtUtc;
+        private long _desiredConfigurationVersion = 1;
+        private long _appliedConfigurationVersion;
 
         internal Cfe718ReaderRuntime(ReaderDeviceConfig config, FileLogger logger)
         {
@@ -82,6 +85,30 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             {
                 if (_logger != null)
                     _logger.Error("reader-runtime", "Reader worker stop failed", ex, _options.Describe());
+            }
+        }
+
+        public bool TryApplyConfiguration(ReaderDeviceConfig config)
+        {
+            if (config == null || _disposed) return false;
+
+            lock (_configurationGate)
+            {
+                // Transport, identity and TID inventory shape require a new SDK session.
+                if (!string.Equals(_config.DriverKey, config.DriverKey, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(_config.Endpoint, config.Endpoint, StringComparison.OrdinalIgnoreCase)
+                    || _config.Port != config.Port
+                    || _config.TidStartAddress != config.TidStartAddress
+                    || _config.TidLength != config.TidLength)
+                    return false;
+
+                var changed = _config.PowerDbm != config.PowerDbm
+                    || _config.ReadIntervalMs != config.ReadIntervalMs;
+                _config.PowerDbm = config.PowerDbm;
+                _config.ReadIntervalMs = config.ReadIntervalMs;
+                _config.ConfigHash = config.ConfigHash;
+                if (changed) _desiredConfigurationVersion++;
+                return true;
             }
         }
 
@@ -140,6 +167,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
                     phase = "apply_reader_configuration";
                     Cfe718ReaderConfiguration.Apply(session, ref comAddress, _options);
+                    lock (_configurationGate) _appliedConfigurationVersion = _desiredConfigurationVersion;
                     if (_logger != null)
                         _logger.Info(
                             "reader-config-apply",
@@ -170,6 +198,9 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
 
                     while (!_cts.IsCancellationRequested)
                     {
+                        phase = "apply_pending_reader_configuration";
+                        ApplyPendingConfiguration(session, ref comAddress);
+
                         var acceptedPorts = 0;
                         var failures = new List<string>();
                         foreach (var portNo in _options.HardwarePorts)
@@ -246,6 +277,26 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             SetStatus(false, "stopped");
             if (_logger != null)
                 _logger.Info("reader-runtime", "Reader worker stopped", _options.Describe());
+        }
+
+        private void ApplyPendingConfiguration(UhfReader288Session session, ref byte comAddress)
+        {
+            lock (_configurationGate)
+            {
+                if (_desiredConfigurationVersion == _appliedConfigurationVersion) return;
+                Cfe718ReaderConfiguration.Apply(session, ref comAddress, _options);
+                _appliedConfigurationVersion = _desiredConfigurationVersion;
+            }
+
+            if (_logger != null)
+                _logger.Info(
+                    "reader-config-apply",
+                    "Reader runtime parameters updated without restarting acquisition",
+                    "serial=" + (_hardwareSerialNumber ?? _config.SerialNumber)
+                    + "; endpoint=" + DescribeEndpoint()
+                    + "; power_dbm=" + _config.PowerDbm.ToString(CultureInfo.InvariantCulture)
+                    + "; read_interval_ms=" + _config.ReadIntervalMs.ToString(CultureInfo.InvariantCulture)
+                    + "; callback_preserved=true");
         }
 
         private int Open(UhfReader288Session session, ref byte comAddress, out int comPort)
@@ -517,7 +568,8 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 return "transport_open_failed; check Windows COM presence, another process holding the port, driver and baud";
             if (string.Equals(phase, "read_sdk_identity", StringComparison.OrdinalIgnoreCase))
                 return "transport_opened_but_reader_identity_failed; check cable, power, baud and SDK compatibility";
-            if (string.Equals(phase, "apply_reader_configuration", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(phase, "apply_reader_configuration", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(phase, "apply_pending_reader_configuration", StringComparison.OrdinalIgnoreCase))
                 return "reader_configuration_sdk_command_failed; inspect Reader-wide RF power and inventory scan time";
             if (string.Equals(phase, "register_callback", StringComparison.OrdinalIgnoreCase))
                 return "reader_connected_but_callback_registration_failed; verify C# SDK callback signature";

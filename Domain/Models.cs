@@ -29,6 +29,51 @@ namespace NSPGatekeeper.Controller.Domain
         }
     }
 
+    public sealed class ControllerRuntimeConfigurationSnapshot
+    {
+        public IList<ReaderDeviceConfig> Devices { get; set; }
+        public IList<ParkingLayoutRuntimeInfo> ParkingLayouts { get; set; }
+
+        public ControllerRuntimeConfigurationSnapshot()
+        {
+            Devices = new List<ReaderDeviceConfig>();
+            ParkingLayouts = new List<ParkingLayoutRuntimeInfo>();
+        }
+    }
+
+    public sealed class ParkingLayoutRuntimeInfo
+    {
+        public string Code { get; set; }
+        public string Name { get; set; }
+        public string State { get; set; }
+        public int PublishedRevision { get; set; }
+        public IList<ParkingLaneRuntimeInfo> Lanes { get; set; }
+
+        public ParkingLayoutRuntimeInfo()
+        {
+            Lanes = new List<ParkingLaneRuntimeInfo>();
+        }
+    }
+
+    public sealed class ParkingLaneRuntimeInfo
+    {
+        public string Code { get; set; }
+        public string Name { get; set; }
+    }
+
+    public sealed class ControllerRuntimeContextSnapshot
+    {
+        public string Mode { get; set; }
+        public IList<ParkingLayoutRuntimeInfo> ParkingLayouts { get; set; }
+        public LaneCalibrationSessionConfig LaneCalibration { get; set; }
+
+        public ControllerRuntimeContextSnapshot()
+        {
+            Mode = "Idle";
+            ParkingLayouts = new List<ParkingLayoutRuntimeInfo>();
+        }
+    }
+
     public sealed class RfidDetection
     {
         public string EventUid { get; set; }
@@ -85,6 +130,7 @@ namespace NSPGatekeeper.Controller.Domain
         public string LaneCalibrationCode { get; set; }
         public string Status { get; set; }
         public string DesiredState { get; set; }
+        public string Reason { get; set; }
         public int Revision { get; set; }
         public IList<LaneCalibrationReaderConfig> Readers { get; set; }
 
@@ -94,9 +140,28 @@ namespace NSPGatekeeper.Controller.Domain
             Readers = new List<LaneCalibrationReaderConfig>();
         }
 
-        public bool IsRunningDesired
+        public bool IsActiveForController
         {
-            get { return Available && string.Equals(DesiredState, "running", StringComparison.OrdinalIgnoreCase); }
+            get
+            {
+                if (!Available) return false;
+
+                var status = (Status ?? string.Empty).Trim();
+                if (string.Equals(status, "ready", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "running", StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                // A terminal or non-runnable status is authoritative even if a stale
+                // desired_state is still present in an older Edge response.
+                if (string.Equals(status, "draft", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "completed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(status, "cancelled", StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                // Compatibility fallback for an older Edge response that omits status.
+                return string.Equals(DesiredState, "running", StringComparison.OrdinalIgnoreCase);
+            }
         }
 
         public LaneCalibrationReaderConfig Reader(string serialNumber)
@@ -132,6 +197,16 @@ namespace NSPGatekeeper.Controller.Domain
         public string Tid { get; set; }
         public double? RssiDbm { get; set; }
         public DateTime ReadAtUtc { get; set; }
+    }
+
+    public sealed class LaneCalibrationPushAck
+    {
+        public string LaneCalibrationCode { get; set; }
+        public int Received { get; set; }
+        public int Stored { get; set; }
+        public int Duplicates { get; set; }
+        public int Ignored { get; set; }
+        public int Rejected { get; set; }
     }
 
     public sealed class LaneCalibrationOutboxItem

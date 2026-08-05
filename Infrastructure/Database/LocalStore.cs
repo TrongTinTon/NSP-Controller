@@ -184,9 +184,11 @@ ON CONFLICT (serial_number) DO UPDATE SET
             }
         }
 
-        public void ClearReaderRuntimeStatuses()
+        public void MarkReaderRuntimeStatusesOffline()
         {
-            ExecuteNonQuery("DELETE FROM controller_reader_runtime_status;");
+            ExecuteNonQuery(
+                "UPDATE controller_reader_runtime_status "
+                + "SET online=FALSE, message='controller_restarted';");
         }
 
         public IList<ReaderStatus> GetReaderStatuses()

@@ -39,12 +39,21 @@ namespace NSPGatekeeper.Controller.Domain
         public DateTime DetectedAtUtc { get; set; }
     }
 
-    public sealed class ReaderStatus
+    public sealed class ReaderDiscoveryObservation
     {
-        // SerialNumber is the configured Server identity and remains the runtime/status key.
         public string DriverKey { get; set; }
         public string SerialNumber { get; set; }
-        // DetectedSdkSerialNumber and DetectedEndpoint are physical observations read locally.
+        public string Endpoint { get; set; }
+        public string FirmwareVersion { get; set; }
+        public DateTime DiscoveredAtUtc { get; set; }
+    }
+
+    public sealed class ReaderStatus
+    {
+        // SerialNumber is always the physical SDK SerialNumber observed by Controller.
+        public string DriverKey { get; set; }
+        public string SerialNumber { get; set; }
+        // Compatibility aliases used by the local observation UI/cache only.
         public string DetectedSdkSerialNumber { get; set; }
         public string DetectedEndpoint { get; set; }
         public string Model { get; set; }

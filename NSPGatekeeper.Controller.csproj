@@ -6,9 +6,9 @@
     <RootNamespace>NSPGatekeeper.Controller</RootNamespace>
     <AssemblyName>NSPGatekeeper.Controller</AssemblyName>
     <LangVersion>7.3</LangVersion>
-    <Version>1.4.8</Version>
-    <FileVersion>1.4.8.0</FileVersion>
-    <AssemblyVersion>1.4.8.0</AssemblyVersion>
+    <Version>1.4.12</Version>
+    <FileVersion>1.4.12.0</FileVersion>
+    <AssemblyVersion>1.4.12.0</AssemblyVersion>
     <Platforms>x86;x64</Platforms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -51,17 +51,12 @@
 
   <ItemGroup>
     <None Include="app.manifest" />
-    <None Update="Native/x86/UHFReader288.dll" Condition="'$(Platform)'=='x86'">
+    <None Update="Readers/CFE718/Vendor/x86/UHFReader288.dll" Condition="'$(Platform)'=='x86'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>UHFReader288.dll</Link>
       <TargetPath>UHFReader288.dll</TargetPath>
     </None>
-    <None Update="Native/x86/dmdll.dll" Condition="'$(Platform)'=='x86'">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>dmdll.dll</Link>
-      <TargetPath>dmdll.dll</TargetPath>
-    </None>
-    <None Update="Native/x64/UHFReader288.dll" Condition="'$(Platform)'=='x64'">
+    <None Update="Readers/CFE718/Vendor/x64/UHFReader288.dll" Condition="'$(Platform)'=='x64'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>UHFReader288.dll</Link>
       <TargetPath>UHFReader288.dll</TargetPath>

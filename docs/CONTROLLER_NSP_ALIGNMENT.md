@@ -11,7 +11,7 @@
 
 - physical Reader connection;
 - dynamic COM/IP binding;
-- SDK SerialNumber verification;
+- SDK SerialNumber observation;
 - Power, read interval and TID technical settings;
 - automatic reconnect;
 - raw TID acquisition;

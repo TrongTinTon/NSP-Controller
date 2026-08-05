@@ -56,6 +56,7 @@ namespace NSPGatekeeper.Controller.Services
 
                 _tasks.Add(Task.Run(() => RunLoop("heartbeat", HeartbeatOnce, () => TimeSpan.FromSeconds(_settings.HeartbeatIntervalSec), token)));
                 _tasks.Add(Task.Run(() => RunLoop("reader-config", PullReaderConfigOnce, () => TimeSpan.FromSeconds(_settings.ReaderConfigIntervalSec), token)));
+                _tasks.Add(Task.Run(() => RunLoop("reader-discovery", _readers.DiscoverReadersOnce, () => TimeSpan.FromSeconds(_settings.ReaderDiscoveryIntervalSec), token)));
                 _tasks.Add(Task.Run(() => RunLoop("reader-status", ReportReaderStatusOnce, () => TimeSpan.FromSeconds(_settings.ReaderStatusIntervalSec), token)));
                 _tasks.Add(Task.Run(() => RunLoop("parking-push", PushDetectionsOnce, () => TimeSpan.FromMilliseconds(_settings.DetectionPushIntervalMs), token)));
                 _tasks.Add(Task.Run(() => RunLoop("lane-calibration-pull", PullLaneCalibrationOnce, LaneCalibrationPollInterval, token)));
@@ -68,6 +69,7 @@ namespace NSPGatekeeper.Controller.Services
                     "Controller workers started",
                     "heartbeat_sec=" + _settings.HeartbeatIntervalSec
                     + "; reader_config_sec=" + _settings.ReaderConfigIntervalSec
+                    + "; reader_discovery_sec=" + _settings.ReaderDiscoveryIntervalSec
                     + "; reader_status_sec=" + _settings.ReaderStatusIntervalSec
                     + "; lane_calibration_idle_sec=" + _settings.LaneCalibrationIdlePollIntervalSec
                     + "; lane_calibration_active_sec=" + _settings.LaneCalibrationActivePollIntervalSec);
@@ -199,20 +201,6 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PullLaneCalibrationOnce()
         {
-            try
-            {
-                EnsureReaderConfigurationSynchronized();
-            }
-            catch (Exception ex)
-            {
-                if (_logger != null)
-                    _logger.Warn(
-                        "lane-calibration",
-                        "Lane Calibration is waiting because Reader configuration could not be synchronized",
-                        ex.Message);
-                return;
-            }
-
             var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
             if (config == null || !config.Available || !config.IsRunningDesired)
             {
@@ -221,75 +209,10 @@ namespace NSPGatekeeper.Controller.Services
                 return;
             }
 
-            try
-            {
-                ApplyLaneCalibrationWithReaderConfigRefresh(config);
-            }
-            catch (ReaderConfigurationUnavailableException ex)
-            {
-                if (_logger != null)
-                    _logger.Warn(
-                        "lane-calibration",
-                        "Lane Calibration is waiting for Reader configuration; Cloud status is not changed to failed",
-                        "code=" + config.LaneCalibrationCode + "; reader=" + ex.SerialNumber + "; reason=" + ex.Message);
-                NotifyStateChanged();
-                return;
-            }
-            catch (Exception ex)
-            {
-                _readers.ClearLaneCalibration("invalid_configuration");
-                _coreApi.ReportLaneCalibrationStatus(
-                    config.LaneCalibrationCode,
-                    "failed",
-                    DateTime.UtcNow,
-                    ex.Message);
-                if (_logger != null) _logger.Error("lane-calibration", "Lane Calibration configuration rejected", ex);
-                NotifyStateChanged();
-                return;
-            }
-
-            if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase) && _logger != null)
-            {
-                _logger.Info(
-                    "lane-calibration",
-                    "Lane Calibration configuration accepted; waiting for the first Reader event before Edge changes the session to running",
-                    "code=" + config.LaneCalibrationCode + "; revision=" + config.Revision);
-            }
-
-            NotifyStateChanged();
-        }
-
-        private void ApplyLaneCalibrationWithReaderConfigRefresh(LaneCalibrationSessionConfig config)
-        {
-            ReaderConfigurationSynchronizationException synchronizationError;
-            try
-            {
-                _readers.ApplyLaneCalibrationConfiguration(config);
-                return;
-            }
-            catch (ReaderConfigurationSynchronizationException ex)
-            {
-                synchronizationError = ex;
-                if (_logger != null)
-                    _logger.Warn(
-                        "lane-calibration",
-                        "Reader configuration mismatch detected; refreshing device configuration before retry",
-                        "reader=" + ex.SerialNumber + "; reason=" + ex.Message);
-            }
-
-            try
-            {
-                PullReaderConfigOnce();
-            }
-            catch (Exception refreshError)
-            {
-                throw new ReaderConfigurationUnavailableException(
-                    synchronizationError.SerialNumber,
-                    "Reader configuration refresh failed; Lane Calibration will retry without changing Cloud status to failed. "
-                    + refreshError.Message);
-            }
-
+            // Controller applies acquisition parameters when a discovered SDK Serial matches.
+            // It does not decide whether a Reader belongs to the Lane Calibration scope.
             _readers.ApplyLaneCalibrationConfiguration(config);
+            NotifyStateChanged();
         }
 
         public void PushLaneCalibrationEventsOnce()

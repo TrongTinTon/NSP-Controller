@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using NSPGatekeeper.Controller.Domain;
 
 namespace NSPGatekeeper.Controller.Readers
@@ -23,6 +24,17 @@ namespace NSPGatekeeper.Controller.Readers
             if (!_factories.TryGetValue(config.DriverKey ?? string.Empty, out factory))
                 throw new InvalidOperationException("Reader driver is not registered: " + (config.DriverKey ?? "<empty>"));
             return factory.Create(config);
+        }
+
+        public IList<ReaderDiscoveryObservation> Discover(ISet<string> excludedEndpoints)
+        {
+            var result = new List<ReaderDiscoveryObservation>();
+            foreach (var provider in _factories.Values.OfType<IReaderDiscoveryProvider>())
+            {
+                var discovered = provider.Discover(excludedEndpoints) ?? new List<ReaderDiscoveryObservation>();
+                result.AddRange(discovered.Where(item => item != null && !string.IsNullOrWhiteSpace(item.SerialNumber)));
+            }
+            return result;
         }
     }
 }

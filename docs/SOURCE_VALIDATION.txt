@@ -1,12 +1,14 @@
-NSP Controller 1.4.8 validation scope
+NSP Controller 1.4.12 validation scope
 
-- Reader starts when present and enabled in Server configuration, regardless of `ports`.
-- Reader config parser ignores Server `ports`.
-- Reader config hash excludes Server `ports`, so a Port-only Server change does not restart the Reader.
-- CF-E718 scans hardware ports 1-4.
-- Every valid raw detection is queued with `port_no`.
-- Lane Calibration routes all detections from selected Readers; Edge filters ports.
-- `controller_reader` does not store business `ports_json`.
-- Readers UI is read-only and contains only identity, connection, status, detail and update time.
-- Dynamic COM rebinding remains based on SDK SerialNumber.
-- Static validation only; Windows MSBuild and physical Reader tests are still required.
+- Vendor C# package and UHFReader288.DLL manual V2.1 reviewed.
+- x86 and x64 UHFReader288.dll files are managed .NET assemblies.
+- Previous mixed x86 P/Invoke / x64 reflection adapter removed.
+- Vendor SDK loading, method lookup, callback adaptation and connection state isolated under Readers/CFE718/Sdk.
+- Factory, discovery, identity, technical configuration, inventory and runtime lifecycle are separated by responsibility.
+- No application-level unmanaged SDK handle is used.
+- No DllImport, Marshal callback bridge or dmdll.dll dependency remains.
+- OpenComPort/OpenNetPort and CloseComPort/CloseNetPort follow the documented managed object lifecycle.
+- TID address and length are supplied on each Inventory_G2 request.
+- SetTIDParameter, StartInventory, StopInventory and StopImmediately are not used in the synchronous CF-E718 path.
+- Controller discovers and reports physical Readers without business validation.
+- Static source/XML/package validation only; Windows MSBuild and physical Reader tests are still required.

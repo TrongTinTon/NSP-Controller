@@ -9,6 +9,7 @@ using NSPGatekeeper.Controller.Infrastructure.Logging;
 using NSPGatekeeper.Controller.Integration.CoreApi;
 using NSPGatekeeper.Controller.Readers;
 using NSPGatekeeper.Controller.Readers.CFE718;
+using NSPGatekeeper.Controller.Readers.CFE718.Sdk;
 using NSPGatekeeper.Controller.Services;
 using NSPGatekeeper.Controller.UI;
 
@@ -37,7 +38,7 @@ namespace NSPGatekeeper.Controller.Bootstrap
                 + "; base_dir=" + baseDirectory
                 + "; os=" + Environment.OSVersion
                 + "; process_arch=" + (Environment.Is64BitProcess ? "x64" : "x86")
-                + "; sdk=" + Cfe718Native.DescribeRuntime());
+                + "; sdk=" + UhfReader288Sdk.DescribeRuntime());
 
             try
             {
@@ -49,7 +50,7 @@ namespace NSPGatekeeper.Controller.Bootstrap
 
                 var store = new LocalStore(settings.PostgreSqlConnectionString, logger);
                 store.EnsureSchema();
-                store.ClearReaderRuntimeStatuses();
+                store.MarkReaderRuntimeStatusesOffline();
 
                 var registry = new ReaderDriverRegistry();
                 registry.Register(new Cfe718ReaderFactory(logger));

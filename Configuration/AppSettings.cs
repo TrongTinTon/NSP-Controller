@@ -17,6 +17,7 @@ namespace NSPGatekeeper.Controller.Configuration
         public int DiscoveryTimeoutMs { get; set; }
         public int HeartbeatIntervalSec { get; set; }
         public int ReaderConfigIntervalSec { get; set; }
+        public int ReaderDiscoveryIntervalSec { get; set; }
         public int ReaderStatusIntervalSec { get; set; }
         public int DetectionPushIntervalMs { get; set; }
         public int DetectionBatchSize { get; set; }
@@ -46,6 +47,7 @@ namespace NSPGatekeeper.Controller.Configuration
                 DiscoveryTimeoutMs = ReadInt("DiscoveryTimeoutMs", 5000, 1000, 30000),
                 HeartbeatIntervalSec = ReadInt("HeartbeatIntervalSec", 30, 5, 3600),
                 ReaderConfigIntervalSec = ReadInt("ReaderConfigIntervalSec", 60, 5, 3600),
+                ReaderDiscoveryIntervalSec = ReadInt("ReaderDiscoveryIntervalSec", 5, 2, 300),
                 ReaderStatusIntervalSec = ReadInt("ReaderStatusIntervalSec", 60, 5, 3600),
                 DetectionPushIntervalMs = ReadInt("DetectionPushIntervalMs", 1000, 100, 60000),
                 DetectionBatchSize = ReadInt("DetectionBatchSize", 1000, 1, 1000),

@@ -163,11 +163,11 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     continue;
                 }
                 serial = NormalizeSerial(serial);
-                if (!IsSdkSerial(serial))
-                    throw new InvalidOperationException(
-                        "Reader serial_number must be the 4-byte SDK SerialNumber encoded as 8 uppercase hexadecimal characters: " + serial);
                 if (!seenSerials.Add(serial))
-                    throw new InvalidOperationException("Controller configuration contains duplicate Reader serial_number: " + serial);
+                {
+                    if (_logger != null) _logger.Warn("device-config", "Duplicate Reader runtime parameters ignored", "serial=" + serial);
+                    continue;
+                }
 
                 var readerParameters = token["reader_parameters"] as JObject ?? new JObject();
                 var config = new ReaderDeviceConfig
@@ -198,21 +198,22 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 devices.Add(new JObject
                 {
                     ["serial_number"] = status.SerialNumber.Trim().ToUpperInvariant(),
-                    ["ports"] = new JArray((status.Ports ?? new List<int>()).Where(value => value >= 1 && value <= 16).Distinct().OrderBy(value => value)),
-                    ["device_status"] = DeviceStatusName(status),
-                    ["last_seen_at"] = reportedSeenAt.ToUniversalTime().ToString("o"),
+                    ["endpoint"] = status.Endpoint ?? string.Empty,
+                    ["status"] = DeviceStatusName(status),
+                    ["last_seen_at"] = reportedSeenAt == default(DateTime) ? null : reportedSeenAt.ToUniversalTime().ToString("o"),
                     ["firmware_version"] = status.FirmwareVersion ?? string.Empty,
                     ["power_dbm"] = Math.Max(0, Math.Min(40, status.PowerDbm)),
-                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, status.ReadIntervalMs))
+                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, status.ReadIntervalMs)),
+                    ["ports"] = new JArray((status.Ports ?? new List<int>()).Where(value => value >= 1 && value <= 16).Distinct().OrderBy(value => value)),
                 });
             }
 
             var response = PostAuthenticated("devices/report", new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["devices"] = devices
+                ["devices"] = devices,
             });
-            LogBatchFailures("reader-status", response);
+            LogBatchFailures("reader-observation", response);
         }
 
         public void PushDetections(IList<RfidDetection> detections)
@@ -271,9 +272,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     var serial = NormalizeSerial((string)reader["serial_number"]);
                     if (string.IsNullOrWhiteSpace(serial)) continue;
-                    if (!IsSdkSerial(serial))
-                        throw new InvalidOperationException(
-                            "Lane Calibration Reader serial_number must be the 4-byte SDK SerialNumber encoded as 8 uppercase hexadecimal characters: " + serial);
                     var readerConfig = new LaneCalibrationReaderConfig
                     {
                         SerialNumber = serial,
@@ -669,12 +667,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return compact.Length == 8 ? compact : text;
         }
 
-        private static bool IsSdkSerial(string value)
-        {
-            return !string.IsNullOrWhiteSpace(value)
-                && value.Length == 8
-                && value.All(Uri.IsHexDigit);
-        }
 
         private static string Clean(string value)
         {

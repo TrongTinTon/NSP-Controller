@@ -23,8 +23,8 @@ namespace NSPGatekeeper.Controller.Domain
             Enabled = true;
             PowerDbm = 30;
             ReadIntervalMs = 200;
-            TidStartAddress = 2;
-            TidLength = 4;
+            TidStartAddress = 0;
+            TidLength = 6;
             Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -177,11 +177,15 @@ namespace NSPGatekeeper.Controller.Domain
         public string SerialNumber { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
+        public int TidStartAddress { get; set; }
+        public int TidLength { get; set; }
 
         public LaneCalibrationReaderConfig()
         {
             PowerDbm = 30;
             ReadIntervalMs = 200;
+            TidStartAddress = 2;
+            TidLength = 4;
         }
     }
 

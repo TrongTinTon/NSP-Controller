@@ -26,13 +26,17 @@ The report contains physical observations only. Controller does not send `reader
 
 ## Raw RFID detections
 
-Controller sends actual SDK `serial_number`, `port_no`, `tid`, timestamp, and RSSI when available. Edge owns all mapping and business validation.
+Controller sends actual SDK `serial_number`, `port_no`, `tid`, timestamp, and `rssi_dbm` when RSSI is available. Edge owns all mapping and business validation.
 
 ## Lane Calibration
 
 Routes use `controller/lane-calibrations/*` and `lane_calibration_*` fields. `status=ready` and `status=running` are both active Controller runtime states. While a calibration session is active, Controller displays Lane Calibration mode, applies temporary Reader-level acquisition settings for matching discovered serials, and forwards raw detections without filtering Readers or Reader Ports. Edge owns the `ready` to `running` business transition after the first accepted raw event.
 
-`POST controller/lane-calibrations/events` returns a batch acknowledgement with aggregate counters: `received`, `stored`, `duplicates`, `ignored`, and `rejected`. Controller marks the local outbox batch as sent only after a valid Edge acknowledgement and records these counters in its log. Per-event business decisions remain owned and logged by Edge.
+Controller does **not** consume the Cloud topology schema directly. `nsp_business_gatekeeper` projects the released Server -> Controller -> Reader tree into a Controller-scoped runtime payload. Each Reader entry contains `serial_number`, `power_dbm`, `read_interval_ms`, `tid_start_address`, and `tid_length`. Reader Ports remain Edge-owned scope and are not used by Controller to filter acquisition.
+
+`POST controller/lane-calibrations/events` returns a batch acknowledgement with aggregate counters: `received`, `stored`, `duplicates`, `ignored`, and `rejected`. Controller marks the local outbox batch as sent only after a valid Edge acknowledgement and records these counters in its log. Per-event business decisions remain owned and logged by Edge. `power_dbm` and `read_interval_ms` in an event are technical evidence of the applied hardware state; Edge must not reject an otherwise valid raw event only because the hardware normalized these values.
+
+If `POST controller/lane-calibrations/status` is used, the payload includes the Lane Calibration `revision` together with `controller_code`, `lane_calibration_code`, `status`, and `occurred_at`.
 
 ## Reader acquisition ownership
 

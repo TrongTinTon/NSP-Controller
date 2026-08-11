@@ -158,6 +158,8 @@ namespace NSPGatekeeper.Controller.Services
                     SerialNumber = NormalizeSerial(reader.SerialNumber),
                     PowerDbm = Math.Max(0, Math.Min(40, reader.PowerDbm)),
                     ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.ReadIntervalMs)),
+                    TidStartAddress = Math.Max(0, reader.TidStartAddress),
+                    TidLength = Math.Max(1, reader.TidLength),
                 })
                 .GroupBy(reader => reader.SerialNumber, StringComparer.OrdinalIgnoreCase)
                 .Select(group => group.Last())
@@ -426,6 +428,8 @@ namespace NSPGatekeeper.Controller.Services
             {
                 config.PowerDbm = NormalizePower(config.DriverKey, calibrationReader.PowerDbm);
                 config.ReadIntervalMs = Math.Max(1, Math.Min(60000, calibrationReader.ReadIntervalMs));
+                config.TidStartAddress = Math.Max(0, calibrationReader.TidStartAddress);
+                config.TidLength = Math.Max(1, calibrationReader.TidLength);
             }
             else
             {
@@ -640,6 +644,8 @@ namespace NSPGatekeeper.Controller.Services
                         SerialNumber = value.SerialNumber,
                         PowerDbm = value.PowerDbm,
                         ReadIntervalMs = value.ReadIntervalMs,
+                        TidStartAddress = value.TidStartAddress,
+                        TidLength = value.TidLength,
                     }).ToList(),
             };
         }
@@ -704,7 +710,8 @@ namespace NSPGatekeeper.Controller.Services
             return (config.LaneCalibrationCode ?? "") + "|" + config.Revision + "|" + string.Join(";",
                 (config.Readers ?? new List<LaneCalibrationReaderConfig>())
                     .OrderBy(value => value.SerialNumber)
-                    .Select(value => value.SerialNumber + ":" + value.PowerDbm + ":" + value.ReadIntervalMs));
+                    .Select(value => value.SerialNumber + ":" + value.PowerDbm + ":" + value.ReadIntervalMs
+                        + ":" + value.TidStartAddress + ":" + value.TidLength));
         }
 
         private static int MaximumPower(string driverKey)

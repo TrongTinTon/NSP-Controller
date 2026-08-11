@@ -1,4 +1,4 @@
-# NSP Gatekeeper Controller 1.4.18
+# NSP Gatekeeper Controller 1.4.19
 
 Windows Controller for NSP Reader acquisition and execution.
 
@@ -27,7 +27,7 @@ Controller does not decide whether a Reader is valid, assigned, managed, in the 
 
 ## CF-E718 SDK implementation
 
-Version 1.4.18 is aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
+Version 1.4.19 remains aligned with `UHFReader288.DLL manual V2.1` supplied with the vendor C# package.
 
 The package states that:
 
@@ -164,6 +164,14 @@ a business runtime is active. Routing is exclusive:
 The Parking push worker is disabled outside Parking runtime. Core API response parsing
 supports both direct payloads and nested T4 Core API envelopes.
 
+
+
+## Controller API alignment (1.4.19)
+
+- Lane Calibration pull now applies contextual TID start/length together with power/read interval.
+- Parking raw detections include RSSI when the Reader SDK provides it.
+- Lane Calibration status payload includes the calibration revision.
+- Controller continues to consume a Controller-scoped flattened runtime contract; Cloud topology schema v4 is translated by Edge and is not exposed directly to the Controller process.
 
 ## Lane Calibration acquisition continuity (1.4.18)
 

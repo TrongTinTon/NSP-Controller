@@ -250,14 +250,16 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             var items = new JArray();
             foreach (var detection in detections)
             {
-                items.Add(new JObject
+                var payload = new JObject
                 {
                     ["event_uid"] = detection.EventUid,
                     ["serial_number"] = detection.SerialNumber,
                     ["port_no"] = detection.PortNo,
                     ["detected_at"] = detection.DetectedAtUtc.ToUniversalTime().ToString("o"),
                     ["tid"] = detection.Tid
-                });
+                };
+                if (detection.RssiDbm.HasValue) payload["rssi_dbm"] = detection.RssiDbm.Value;
+                items.Add(payload);
             }
 
             PostAuthenticated("parking/detections/push", new JObject
@@ -309,7 +311,9 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     {
                         SerialNumber = serial,
                         PowerDbm = Math.Max(0, Math.Min(40, reader.Value<int?>("power_dbm") ?? 30)),
-                        ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.Value<int?>("read_interval_ms") ?? 200))
+                        ReadIntervalMs = Math.Max(1, Math.Min(60000, reader.Value<int?>("read_interval_ms") ?? 200)),
+                        TidStartAddress = Math.Max(0, reader.Value<int?>("tid_start_address") ?? 2),
+                        TidLength = Math.Max(1, reader.Value<int?>("tid_length") ?? 4)
                     };
                     if (!config.Readers.Any(x => string.Equals(x.SerialNumber, serial, StringComparison.OrdinalIgnoreCase)))
                         config.Readers.Add(readerConfig);
@@ -380,12 +384,13 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return ack;
         }
 
-        public void ReportLaneCalibrationStatus(string laneCalibrationCode, string status, DateTime occurredAtUtc, string message)
+        public void ReportLaneCalibrationStatus(string laneCalibrationCode, int revision, string status, DateTime occurredAtUtc, string message)
         {
             var payload = new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
                 ["lane_calibration_code"] = laneCalibrationCode,
+                ["revision"] = Math.Max(1, revision),
                 ["status"] = status,
                 ["occurred_at"] = occurredAtUtc.ToUniversalTime().ToString("o")
             };

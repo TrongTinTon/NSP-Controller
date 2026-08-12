@@ -22,7 +22,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
     {
         private const string LaneCalibrationPullRoute = "controller/lane-calibrations/pull";
         private const string LaneCalibrationEventsRoute = "controller/lane-calibrations/events";
-        private const string LaneCalibrationStatusRoute = "controller/lane-calibrations/status";
         private readonly AppSettings _settings;
         private readonly FileLogger _logger;
         private readonly ZeroconfDiscoveryClient _discovery;
@@ -181,37 +180,11 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 };
                 config.ConfigHash = ReaderRuntimeConfigHash(config);
 
-                // Server owns Reader Port topology. Controller ignores token["ports"]
-                // and forwards the raw port_no reported by the Reader SDK.
+                // Port/Antenna topology is Edge-owned and is not part of this contract.
+                // Controller forwards the raw port_no reported by the Reader SDK.
                 snapshot.Devices.Add(config);
             }
 
-            var layouts = data["parking_layouts"] as JArray;
-            var seenLayouts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var token in (layouts ?? new JArray()).OfType<JObject>())
-            {
-                var code = Clean((string)token["parking_area_code"]);
-                if (string.IsNullOrWhiteSpace(code) || !seenLayouts.Add(code)) continue;
-                var layout = new ParkingLayoutRuntimeInfo
-                {
-                    Code = code.ToUpperInvariant(),
-                    Name = Clean((string)token["parking_area_name"]),
-                    State = Clean((string)token["state"]),
-                    PublishedRevision = Math.Max(0, token.Value<int?>("published_revision") ?? 0),
-                };
-                var lanes = token["lanes"] as JArray;
-                foreach (var laneToken in (lanes ?? new JArray()).OfType<JObject>())
-                {
-                    var laneCode = Clean((string)laneToken["lane_code"]);
-                    if (string.IsNullOrWhiteSpace(laneCode)) continue;
-                    layout.Lanes.Add(new ParkingLaneRuntimeInfo
-                    {
-                        Code = laneCode.ToUpperInvariant(),
-                        Name = Clean((string)laneToken["lane_name"]),
-                    });
-                }
-                snapshot.ParkingLayouts.Add(layout);
-            }
 
             return snapshot;
         }
@@ -223,17 +196,21 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             {
                 if (status == null || string.IsNullOrWhiteSpace(status.SerialNumber)) continue;
                 var reportedSeenAt = status.Online ? DateTime.UtcNow : status.UpdatedAtUtc;
-                devices.Add(new JObject
+                var item = new JObject
                 {
                     ["serial_number"] = status.SerialNumber.Trim().ToUpperInvariant(),
                     ["endpoint"] = status.Endpoint ?? string.Empty,
                     ["status"] = DeviceStatusName(status),
                     ["last_seen_at"] = reportedSeenAt == default(DateTime) ? null : reportedSeenAt.ToUniversalTime().ToString("o"),
                     ["firmware_version"] = status.FirmwareVersion ?? string.Empty,
-                    ["power_dbm"] = Math.Max(0, Math.Min(40, status.PowerDbm)),
-                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, status.ReadIntervalMs)),
                     ["ports"] = new JArray((status.Ports ?? new List<int>()).Where(value => value >= 1 && value <= 16).Distinct().OrderBy(value => value)),
-                });
+                };
+                if (status.ConfigurationApplied)
+                {
+                    item["power_dbm"] = Math.Max(0, Math.Min(40, status.PowerDbm));
+                    item["read_interval_ms"] = Math.Max(1, Math.Min(60000, status.ReadIntervalMs));
+                }
+                devices.Add(item);
             }
 
             var response = PostAuthenticated("devices/report", new JObject
@@ -382,20 +359,6 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                     + events.Count.ToString(CultureInfo.InvariantCulture)
                     + "; received=" + ack.Received.ToString(CultureInfo.InvariantCulture));
             return ack;
-        }
-
-        public void ReportLaneCalibrationStatus(string laneCalibrationCode, int revision, string status, DateTime occurredAtUtc, string message)
-        {
-            var payload = new JObject
-            {
-                ["controller_code"] = _settings.ControllerCode,
-                ["lane_calibration_code"] = laneCalibrationCode,
-                ["revision"] = Math.Max(1, revision),
-                ["status"] = status,
-                ["occurred_at"] = occurredAtUtc.ToUniversalTime().ToString("o")
-            };
-            if (!string.IsNullOrWhiteSpace(message)) payload["message"] = message.Trim();
-            PostAuthenticated(LaneCalibrationStatusRoute, payload);
         }
 
         private void AuthenticateWithDiscoveryFallback(Exception firstError)

@@ -23,8 +23,14 @@ CREATE TABLE IF NOT EXISTS controller_reader_runtime_status (
     online              BOOLEAN NOT NULL DEFAULT FALSE,
     message             TEXT,
     firmware_version    VARCHAR(128),
-    power_dbm           INTEGER NOT NULL DEFAULT 30,
-    read_interval_ms    INTEGER NOT NULL DEFAULT 200,
+    power_dbm           INTEGER NOT NULL DEFAULT 0,
+    read_interval_ms    INTEGER NOT NULL DEFAULT 0,
+    tid_start_address   INTEGER NOT NULL DEFAULT 0,
+    tid_length          INTEGER NOT NULL DEFAULT 0,
+    configuration_applied BOOLEAN NOT NULL DEFAULT FALSE,
+    configuration_source VARCHAR(32),
+    applied_config_hash VARCHAR(128),
+    configuration_applied_at TIMESTAMPTZ,
     ports_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -34,14 +40,24 @@ ALTER TABLE controller_reader_runtime_status
 ALTER TABLE controller_reader_runtime_status
     ADD COLUMN IF NOT EXISTS detected_endpoint VARCHAR(256);
 
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS tid_start_address INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS tid_length INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS configuration_applied BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS configuration_source VARCHAR(32);
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS applied_config_hash VARCHAR(128);
+ALTER TABLE controller_reader_runtime_status
+    ADD COLUMN IF NOT EXISTS configuration_applied_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS ix_controller_reader_runtime_detected_serial
     ON controller_reader_runtime_status(detected_sdk_serial);
 
-CREATE TABLE IF NOT EXISTS controller_runtime_context (
-    singleton_id         SMALLINT PRIMARY KEY CHECK (singleton_id = 1),
-    parking_layouts_json JSONB NOT NULL DEFAULT '[]'::jsonb,
-    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+-- Business Parking context is Edge-owned. Remove legacy Controller cache if present.
+DROP TABLE IF EXISTS controller_runtime_context;
 
 CREATE TABLE IF NOT EXISTS controller_parking_outbox (
     id                  BIGSERIAL PRIMARY KEY,

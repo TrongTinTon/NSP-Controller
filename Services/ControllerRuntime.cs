@@ -26,6 +26,7 @@ namespace NSPGatekeeper.Controller.Services
         private bool _readerConfigSynchronized;
         private string _connectionMessage = "stopped";
         private string _lastLaneCalibrationPullSignature = string.Empty;
+        private DateTime _lastLaneCalibrationSuccessfulPullUtc = DateTime.MinValue;
 
         public ControllerRuntime(AppSettings settings, LocalStore store, CoreApiClient coreApi, ReaderManager readers, FileLogger logger)
         {
@@ -74,7 +75,8 @@ namespace NSPGatekeeper.Controller.Services
                     + "; reader_discovery_sec=" + _settings.ReaderDiscoveryIntervalSec
                     + "; reader_status_sec=" + _settings.ReaderStatusIntervalSec
                     + "; lane_calibration_idle_sec=" + _settings.LaneCalibrationIdlePollIntervalSec
-                    + "; lane_calibration_active_sec=" + _settings.LaneCalibrationActivePollIntervalSec);
+                    + "; lane_calibration_active_sec=" + _settings.LaneCalibrationActivePollIntervalSec
+                    + "; lane_calibration_lease_sec=" + _settings.LaneCalibrationLeaseTimeoutSec);
             NotifyStateChanged();
         }
 
@@ -171,8 +173,7 @@ namespace NSPGatekeeper.Controller.Services
                 _logger.Info(
                     "reader-config",
                     "Controller runtime configuration synchronized",
-                    "reader_count=" + snapshot.Devices.Count
-                    + "; parking_layout_count=" + snapshot.ParkingLayouts.Count);
+                    "reader_count=" + snapshot.Devices.Count);
             NotifyStateChanged();
         }
 
@@ -183,11 +184,9 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PushDetectionsOnce()
         {
-            // Parking outbox may contain legitimate unsent records from an earlier
-            // Parking runtime. Do not transmit it while Controller is Idle or while
-            // Lane Calibration owns acquisition routing.
-            if (!_readers.IsParkingRuntimeActive) return;
-
+            // ReaderManager routes each physical observation to exactly one outbox:
+            // a Reader explicitly scoped by an active Calibration Session goes to
+            // Calibration; every other Reader continues normal raw Parking acquisition.
             var batch = _store.GetPendingDetections(_settings.DetectionBatchSize);
             if (batch.Count == 0) return;
             var ids = batch.Select(x => x.Id).ToList();
@@ -214,19 +213,45 @@ namespace NSPGatekeeper.Controller.Services
 
         public void PullLaneCalibrationOnce()
         {
-            var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
-            LogLaneCalibrationPullState(config);
-            if (config == null || !config.Available || !config.IsActiveForController)
+            try
             {
-                _readers.ClearLaneCalibration(config == null ? "no_session" : (config.Status ?? "stopped"));
-                NotifyStateChanged();
-                return;
-            }
+                var config = _coreApi.PullLaneCalibration(_readers.CurrentLaneCalibrationCode);
+                _lastLaneCalibrationSuccessfulPullUtc = DateTime.UtcNow;
+                LogLaneCalibrationPullState(config);
+                if (config == null || !config.Available || !config.IsActiveForController)
+                {
+                    _readers.ClearLaneCalibration(config == null ? "no_session" : (config.Status ?? "stopped"));
+                    NotifyStateChanged();
+                    return;
+                }
 
-            // Ready and running sessions are both active Controller runtime contexts.
-            // Controller applies acquisition parameters when a discovered SDK Serial matches.
-            // It does not decide whether a Reader belongs to the Lane Calibration scope.
-            _readers.ApplyLaneCalibrationConfiguration(config);
+                // Ready and running sessions are execution contexts supplied by Edge.
+                // The explicit Reader list is an execution scope, not a Parking/Lane decision.
+                // Only matching SDK Serials receive Calibration acquisition parameters.
+                _readers.ApplyLaneCalibrationConfiguration(config);
+                NotifyStateChanged();
+            }
+            catch
+            {
+                ExpireLaneCalibrationLeaseIfNeeded();
+                throw;
+            }
+        }
+
+        private void ExpireLaneCalibrationLeaseIfNeeded()
+        {
+            if (string.IsNullOrWhiteSpace(_readers.CurrentLaneCalibrationCode)) return;
+            if (_lastLaneCalibrationSuccessfulPullUtc == DateTime.MinValue) return;
+            if (DateTime.UtcNow - _lastLaneCalibrationSuccessfulPullUtc
+                <= TimeSpan.FromSeconds(_settings.LaneCalibrationLeaseTimeoutSec)) return;
+
+            var code = _readers.CurrentLaneCalibrationCode;
+            _readers.ClearLaneCalibration("lease_expired");
+            if (_logger != null)
+                _logger.Warn(
+                    "lane-calibration-lease",
+                    "Lane Calibration execution lease expired; Readers returned to normal acquisition",
+                    "code=" + code + "; timeout_sec=" + _settings.LaneCalibrationLeaseTimeoutSec);
             NotifyStateChanged();
         }
 

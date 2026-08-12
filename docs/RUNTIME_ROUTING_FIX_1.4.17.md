@@ -1,3 +1,5 @@
+> **Historical / superseded:** This document describes 1.4.17 behavior and is superseded by the Controller boundary architecture in 1.4.20+ and the per-Reader Calibration routing in 1.4.21. Do not use it as the current runtime contract.
+
 # Runtime routing fix — Controller 1.4.17
 
 ## Correct routing rule

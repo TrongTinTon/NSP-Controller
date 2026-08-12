@@ -23,6 +23,7 @@ namespace NSPGatekeeper.Controller.Configuration
         public int DetectionBatchSize { get; set; }
         public int LaneCalibrationIdlePollIntervalSec { get; set; }
         public int LaneCalibrationActivePollIntervalSec { get; set; }
+        public int LaneCalibrationLeaseTimeoutSec { get; set; }
         public int LaneCalibrationPushIntervalMs { get; set; }
         public int LaneCalibrationBatchSize { get; set; }
         public int CleanupIntervalSec { get; set; }
@@ -53,6 +54,7 @@ namespace NSPGatekeeper.Controller.Configuration
                 DetectionBatchSize = ReadInt("DetectionBatchSize", 1000, 1, 1000),
                 LaneCalibrationIdlePollIntervalSec = ReadInt("LaneCalibrationIdlePollIntervalSec", 5, 2, 300),
                 LaneCalibrationActivePollIntervalSec = ReadInt("LaneCalibrationActivePollIntervalSec", 3, 1, 60),
+                LaneCalibrationLeaseTimeoutSec = ReadInt("LaneCalibrationLeaseTimeoutSec", 30, 5, 300),
                 LaneCalibrationPushIntervalMs = ReadInt("LaneCalibrationPushIntervalMs", 1000, 100, 60000),
                 LaneCalibrationBatchSize = ReadInt("LaneCalibrationBatchSize", 100, 1, 100),
                 CleanupIntervalSec = ReadInt("CleanupIntervalSec", 3600, 60, 86400),

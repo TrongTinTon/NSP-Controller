@@ -27,5 +27,6 @@ namespace NSPGatekeeper.Controller.Readers
         // Applies Reader-wide runtime parameters without replacing the physical
         // acquisition worker. Returns false when the change requires a reconnect.
         bool TryApplyConfiguration(ReaderDeviceConfig config);
+        ReaderAppliedConfiguration GetAppliedConfiguration();
     }
 }

@@ -33,6 +33,7 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
         private DateTime _lastPortFailureLogAtUtc;
         private long _desiredConfigurationVersion = 1;
         private long _appliedConfigurationVersion;
+        private ReaderAppliedConfiguration _appliedConfiguration;
 
         internal Cfe718ReaderRuntime(ReaderDeviceConfig config, FileLogger logger)
         {
@@ -103,12 +104,22 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                     return false;
 
                 var changed = _config.PowerDbm != config.PowerDbm
-                    || _config.ReadIntervalMs != config.ReadIntervalMs;
+                    || _config.ReadIntervalMs != config.ReadIntervalMs
+                    || !string.Equals(_config.ConfigurationSource, config.ConfigurationSource, StringComparison.OrdinalIgnoreCase);
                 _config.PowerDbm = config.PowerDbm;
                 _config.ReadIntervalMs = config.ReadIntervalMs;
+                _config.ConfigurationSource = config.ConfigurationSource;
                 _config.ConfigHash = config.ConfigHash;
                 if (changed) _desiredConfigurationVersion++;
                 return true;
+            }
+        }
+
+        public ReaderAppliedConfiguration GetAppliedConfiguration()
+        {
+            lock (_configurationGate)
+            {
+                return CloneAppliedConfiguration(_appliedConfiguration);
             }
         }
 
@@ -166,8 +177,12 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                     ApplyIdentity(Cfe718ReaderIdentity.Read(session, ref comAddress));
 
                     phase = "apply_reader_configuration";
-                    Cfe718ReaderConfiguration.Apply(session, ref comAddress, _options);
-                    lock (_configurationGate) _appliedConfigurationVersion = _desiredConfigurationVersion;
+                    lock (_configurationGate)
+                    {
+                        Cfe718ReaderConfiguration.Apply(session, ref comAddress, _options);
+                        MarkConfigurationAppliedLocked();
+                        _appliedConfigurationVersion = _desiredConfigurationVersion;
+                    }
                     if (_logger != null)
                         _logger.Info(
                             "reader-config-apply",
@@ -285,8 +300,11 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
             {
                 if (_desiredConfigurationVersion == _appliedConfigurationVersion) return;
                 Cfe718ReaderConfiguration.Apply(session, ref comAddress, _options);
+                MarkConfigurationAppliedLocked();
                 _appliedConfigurationVersion = _desiredConfigurationVersion;
             }
+
+            SetStatus(true, "inventory_running");
 
             if (_logger != null)
                 _logger.Info(
@@ -503,8 +521,14 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 Endpoint = DescribeEndpoint(),
                 Online = online,
                 Message = message,
-                PowerDbm = Math.Max(0, Math.Min(33, _config.PowerDbm)),
-                ReadIntervalMs = Math.Max(1, Math.Min(60000, _config.ReadIntervalMs)),
+                PowerDbm = 0,
+                ReadIntervalMs = 0,
+                TidStartAddress = 0,
+                TidLength = 0,
+                ConfigurationApplied = false,
+                ConfigurationSource = _config.ConfigurationSource ?? "Default",
+                AppliedConfigHash = null,
+                ConfigurationAppliedAtUtc = null,
                 Ports = _options.HardwarePorts,
                 UpdatedAtUtc = DateTime.UtcNow
             };
@@ -525,8 +549,67 @@ namespace NSPGatekeeper.Controller.Readers.CFE718
                 FirmwareVersion = source.FirmwareVersion,
                 PowerDbm = source.PowerDbm,
                 ReadIntervalMs = source.ReadIntervalMs,
+                TidStartAddress = source.TidStartAddress,
+                TidLength = source.TidLength,
+                ConfigurationApplied = source.ConfigurationApplied,
+                ConfigurationSource = source.ConfigurationSource,
+                AppliedConfigHash = source.AppliedConfigHash,
+                ConfigurationAppliedAtUtc = source.ConfigurationAppliedAtUtc,
                 Ports = source.Ports == null ? new List<int>() : new List<int>(source.Ports),
                 UpdatedAtUtc = source.UpdatedAtUtc
+            };
+        }
+
+        private void MarkConfigurationAppliedLocked()
+        {
+            var applied = BuildAppliedConfigurationLocked();
+            _appliedConfiguration = applied;
+            ApplyConfigurationToStatus(applied);
+        }
+
+        private ReaderAppliedConfiguration BuildAppliedConfigurationLocked()
+        {
+            return new ReaderAppliedConfiguration
+            {
+                Source = string.IsNullOrWhiteSpace(_config.ConfigurationSource) ? "Default" : _config.ConfigurationSource.Trim(),
+                PowerDbm = Cfe718Options.ClampByte(_config.PowerDbm, 0, 33),
+                ReadIntervalMs = Math.Max(100, _options.ScanTime * 100),
+                TidStartAddress = Cfe718Options.ClampByte(_config.TidStartAddress, 0, 255),
+                TidLength = Cfe718Options.ClampByte(_config.TidLength, 1, 15),
+                ConfigHash = _config.ConfigHash,
+                AppliedAtUtc = DateTime.UtcNow,
+            };
+        }
+
+        private void ApplyConfigurationToStatus(ReaderAppliedConfiguration applied)
+        {
+            if (applied == null) return;
+            lock (_statusGate)
+            {
+                _status.PowerDbm = applied.PowerDbm;
+                _status.ReadIntervalMs = applied.ReadIntervalMs;
+                _status.TidStartAddress = applied.TidStartAddress;
+                _status.TidLength = applied.TidLength;
+                _status.ConfigurationApplied = true;
+                _status.ConfigurationSource = applied.Source;
+                _status.AppliedConfigHash = applied.ConfigHash;
+                _status.ConfigurationAppliedAtUtc = applied.AppliedAtUtc;
+                _status.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        private static ReaderAppliedConfiguration CloneAppliedConfiguration(ReaderAppliedConfiguration source)
+        {
+            if (source == null) return null;
+            return new ReaderAppliedConfiguration
+            {
+                Source = source.Source,
+                PowerDbm = source.PowerDbm,
+                ReadIntervalMs = source.ReadIntervalMs,
+                TidStartAddress = source.TidStartAddress,
+                TidLength = source.TidLength,
+                ConfigHash = source.ConfigHash,
+                AppliedAtUtc = source.AppliedAtUtc,
             };
         }
 

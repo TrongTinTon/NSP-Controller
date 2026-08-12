@@ -120,40 +120,6 @@ SELECT serial_number, driver_key, endpoint, port, enabled, config_hash,
             return result;
         }
 
-        public void SaveParkingLayouts(IList<ParkingLayoutRuntimeInfo> layouts)
-        {
-            const string sql = @"
-INSERT INTO controller_runtime_context(singleton_id, parking_layouts_json, updated_at)
-VALUES (1, CAST(@parking_layouts_json AS jsonb), NOW())
-ON CONFLICT (singleton_id) DO UPDATE SET
- parking_layouts_json=EXCLUDED.parking_layouts_json,
- updated_at=NOW();";
-            using (var conn = Open())
-            using (var cmd = new NpgsqlCommand(sql, conn))
-            {
-                cmd.Parameters.AddWithValue(
-                    "parking_layouts_json",
-                    JsonConvert.SerializeObject(layouts ?? new List<ParkingLayoutRuntimeInfo>()));
-                cmd.ExecuteNonQuery();
-            }
-        }
-
-        public IList<ParkingLayoutRuntimeInfo> GetParkingLayouts()
-        {
-            const string sql = @"
-SELECT parking_layouts_json::text
-  FROM controller_runtime_context
- WHERE singleton_id=1";
-            using (var conn = Open())
-            using (var cmd = new NpgsqlCommand(sql, conn))
-            {
-                var value = cmd.ExecuteScalar();
-                if (value == null || value == DBNull.Value) return new List<ParkingLayoutRuntimeInfo>();
-                return JsonConvert.DeserializeObject<List<ParkingLayoutRuntimeInfo>>(Convert.ToString(value))
-                    ?? new List<ParkingLayoutRuntimeInfo>();
-            }
-        }
-
         public void UpdateLocalReaderConnection(string serialNumber, string driverKey, string endpoint, int port)
         {
             serialNumber = (serialNumber ?? string.Empty).Trim().ToUpperInvariant();
@@ -182,9 +148,13 @@ UPDATE controller_reader
             if (status == null || string.IsNullOrWhiteSpace(status.SerialNumber)) return;
             const string sql = @"
 INSERT INTO controller_reader_runtime_status
-(serial_number, detected_sdk_serial, detected_endpoint, driver_key, model, endpoint, online, message, firmware_version, power_dbm, read_interval_ms, ports_json, updated_at)
+(serial_number, detected_sdk_serial, detected_endpoint, driver_key, model, endpoint, online, message, firmware_version,
+ power_dbm, read_interval_ms, tid_start_address, tid_length, configuration_applied, configuration_source,
+ applied_config_hash, configuration_applied_at, ports_json, updated_at)
 VALUES
-(@serial_number, @detected_sdk_serial, @detected_endpoint, @driver_key, @model, @endpoint, @online, @message, @firmware_version, @power_dbm, @read_interval_ms, CAST(@ports_json AS jsonb), @updated_at)
+(@serial_number, @detected_sdk_serial, @detected_endpoint, @driver_key, @model, @endpoint, @online, @message, @firmware_version,
+ @power_dbm, @read_interval_ms, @tid_start_address, @tid_length, @configuration_applied, @configuration_source,
+ @applied_config_hash, @configuration_applied_at, CAST(@ports_json AS jsonb), @updated_at)
 ON CONFLICT (serial_number) DO UPDATE SET
  detected_sdk_serial=EXCLUDED.detected_sdk_serial,
  detected_endpoint=EXCLUDED.detected_endpoint,
@@ -196,6 +166,12 @@ ON CONFLICT (serial_number) DO UPDATE SET
  firmware_version=EXCLUDED.firmware_version,
  power_dbm=EXCLUDED.power_dbm,
  read_interval_ms=EXCLUDED.read_interval_ms,
+ tid_start_address=EXCLUDED.tid_start_address,
+ tid_length=EXCLUDED.tid_length,
+ configuration_applied=EXCLUDED.configuration_applied,
+ configuration_source=EXCLUDED.configuration_source,
+ applied_config_hash=EXCLUDED.applied_config_hash,
+ configuration_applied_at=EXCLUDED.configuration_applied_at,
  ports_json=EXCLUDED.ports_json,
  updated_at=EXCLUDED.updated_at;";
             using (var conn = Open())
@@ -211,7 +187,14 @@ ON CONFLICT (serial_number) DO UPDATE SET
                 AddText(cmd, "message", status.Message);
                 AddText(cmd, "firmware_version", status.FirmwareVersion);
                 cmd.Parameters.AddWithValue("power_dbm", Math.Max(0, Math.Min(40, status.PowerDbm)));
-                cmd.Parameters.AddWithValue("read_interval_ms", Math.Max(1, Math.Min(60000, status.ReadIntervalMs)));
+                cmd.Parameters.AddWithValue("read_interval_ms", Math.Max(0, Math.Min(60000, status.ReadIntervalMs)));
+                cmd.Parameters.AddWithValue("tid_start_address", Math.Max(0, status.TidStartAddress));
+                cmd.Parameters.AddWithValue("tid_length", Math.Max(0, status.TidLength));
+                cmd.Parameters.AddWithValue("configuration_applied", status.ConfigurationApplied);
+                AddText(cmd, "configuration_source", status.ConfigurationSource);
+                AddText(cmd, "applied_config_hash", status.AppliedConfigHash);
+                cmd.Parameters.AddWithValue("configuration_applied_at", NpgsqlDbType.TimestampTz,
+                    status.ConfigurationAppliedAtUtc.HasValue ? (object)NormalizeUtc(status.ConfigurationAppliedAtUtc.Value) : DBNull.Value);
                 cmd.Parameters.AddWithValue("ports_json", JsonConvert.SerializeObject((status.Ports ?? new List<int>()).Where(value => value >= 1 && value <= 16).Distinct().OrderBy(value => value)));
                 cmd.Parameters.AddWithValue("updated_at", NormalizeUtc(status.UpdatedAtUtc));
                 cmd.ExecuteNonQuery();
@@ -229,7 +212,9 @@ ON CONFLICT (serial_number) DO UPDATE SET
         {
             const string sql = @"
 SELECT s.serial_number, s.detected_sdk_serial, s.detected_endpoint, s.driver_key, s.model, s.endpoint,
-       s.online, s.message, s.firmware_version, s.power_dbm, s.read_interval_ms, s.ports_json::text, s.updated_at
+       s.online, s.message, s.firmware_version, s.power_dbm, s.read_interval_ms,
+       s.tid_start_address, s.tid_length, s.configuration_applied, s.configuration_source,
+       s.applied_config_hash, s.configuration_applied_at, s.ports_json::text, s.updated_at
   FROM controller_reader_runtime_status s
  WHERE NULLIF(BTRIM(s.detected_sdk_serial), '') IS NOT NULL
  ORDER BY s.detected_sdk_serial, s.updated_at DESC";
@@ -253,8 +238,14 @@ SELECT s.serial_number, s.detected_sdk_serial, s.detected_endpoint, s.driver_key
                         FirmwareVersion = GetNullableString(reader, 8),
                         PowerDbm = reader.GetInt32(9),
                         ReadIntervalMs = reader.GetInt32(10),
-                        Ports = JsonConvert.DeserializeObject<List<int>>(reader.GetString(11)) ?? new List<int>(),
-                        UpdatedAtUtc = reader.GetDateTime(12).ToUniversalTime()
+                        TidStartAddress = reader.GetInt32(11),
+                        TidLength = reader.GetInt32(12),
+                        ConfigurationApplied = reader.GetBoolean(13),
+                        ConfigurationSource = GetNullableString(reader, 14),
+                        AppliedConfigHash = GetNullableString(reader, 15),
+                        ConfigurationAppliedAtUtc = reader.IsDBNull(16) ? (DateTime?)null : reader.GetDateTime(16).ToUniversalTime(),
+                        Ports = JsonConvert.DeserializeObject<List<int>>(reader.GetString(17)) ?? new List<int>(),
+                        UpdatedAtUtc = reader.GetDateTime(18).ToUniversalTime()
                     });
                 }
             }

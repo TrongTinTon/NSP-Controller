@@ -144,35 +144,40 @@ Build and hardware integration tests must be run on Windows with the physical CF
 
 ## Controller Runtime Context UI
 
-The Controller tab shows the actual runtime context supplied by Edge: `Idle`, `Parking Layout`, or `Lane Calibration`. Parking Layout rows include code, name, state, published revision and the lanes assigned to this Controller. Lane Calibration shows code, status, revision and Reader count. The Controller does not evaluate or own this business context.
+The Controller UI exposes acquisition state only. Normal mode is `Normal RFID Acquisition`. When an explicit Calibration execution scope is active, the UI reports `Calibration Acquisition` or `Normal + Calibration Acquisition` depending on the physical Readers currently observed. Parking Layout, logical Lane, Antenna Sequence and Check-in/Check-out are never delivered to or cached by Controller.
 
 ## Lane Calibration Ready Runtime
 
 A Lane Calibration session is active for Controller UI and acquisition when `status` is `ready` or `running`. Terminal statuses (`draft`, `completed`, `failed`, `cancelled`) are authoritative. `desired_state=running` is used only as a compatibility fallback when an older Edge response omits `status`.
 
-Lane Calibration event pushes now log the Edge acknowledgement counters (`received`, `stored`, `duplicates`, `ignored`, `rejected`). This distinguishes transport delivery from Edge business acceptance and prevents an HTTP 200 response from being reported as “stored” without evidence.
+Lane Calibration event pushes log the Edge acknowledgement counters (`received`, `stored`, `duplicates`, `ignored`, `rejected`). This distinguishes transport delivery from Edge acceptance.
 
-## Runtime routing invariant
+## Acquisition invariant
 
-A connected Reader is only a technical acquisition source. It does not imply that
-a business runtime is active. Routing is exclusive:
+A connected Reader is a physical acquisition source. Controller never asks whether a Parking Layout or Lane is active. Routing is:
 
-- `Lane Calibration` → Lane Calibration events only.
-- `Parking Layout` → Parking detections only.
-- `Idle` → detections remain visible locally and are not queued or pushed.
+- Active `Lane Calibration` → raw calibration event outbox for that execution session.
+- Otherwise → every valid physical RFID detection is queued and pushed to Edge as raw detection.
 
-The Parking push worker is disabled outside Parking runtime. Core API response parsing
-supports both direct payloads and nested T4 Core API envelopes.
+Edge alone decides whether an observation belongs to a Parking Layout/Lane, matches an Antenna Sequence, resolves a User/Vehicle, and creates a Parking Transaction.
 
-
-
-## Controller API alignment (1.4.19)
+## Controller API alignment (1.4.20)
 
 - Lane Calibration pull now applies contextual TID start/length together with power/read interval.
 - Parking raw detections include RSSI when the Reader SDK provides it.
 - Lane Calibration status payload includes the calibration revision.
-- Controller continues to consume a Controller-scoped flattened runtime contract; Cloud topology schema v4 is translated by Edge and is not exposed directly to the Controller process.
+- `controller/device-config/pull` contains Reader identity and Reader-level technical parameters only. It contains no Parking Layout, Lane, Antenna Sequence or Port filtering contract.
 
 ## Lane Calibration acquisition continuity (1.4.18)
 
 Lane Calibration Reader-wide power and scan interval changes are applied on the existing SDK session between inventory cycles. The physical Reader worker and RFID callback are not replaced for these changes. Logs now distinguish `lane-calibration-route`, durable local persistence (`lane-calibration-outbox`), and Edge delivery (`lane-calibration-push`).
+
+
+## Controller architecture audit (1.4.21)
+
+- Calibration execution scope is per Reader SDK Serial, not global per Controller.
+- Normal Parking raw-detection outbox continues to push while other Readers are in Calibration acquisition.
+- Active Calibration execution context expires locally when Edge cannot refresh the lease.
+- Reader UI shows the last configuration confirmed after SDK apply succeeds: source, RF power, effective scan interval, TID start/length and applied timestamp.
+- Desired/effective configuration is no longer presented as if it were physically applied.
+- Controller remains acquisition/execution only; Parking Layout, Lane matching and Parking business stay on Edge.

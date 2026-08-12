@@ -12,6 +12,7 @@ namespace NSPGatekeeper.Controller.Domain
         public int Port { get; set; }
         public bool Enabled { get; set; }
         public string ConfigHash { get; set; }
+        public string ConfigurationSource { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
         public int TidStartAddress { get; set; }
@@ -21,10 +22,11 @@ namespace NSPGatekeeper.Controller.Domain
         public ReaderDeviceConfig()
         {
             Enabled = true;
+            ConfigurationSource = "Default";
             PowerDbm = 30;
             ReadIntervalMs = 200;
-            TidStartAddress = 0;
-            TidLength = 6;
+            TidStartAddress = 2;
+            TidLength = 4;
             Options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -32,45 +34,21 @@ namespace NSPGatekeeper.Controller.Domain
     public sealed class ControllerRuntimeConfigurationSnapshot
     {
         public IList<ReaderDeviceConfig> Devices { get; set; }
-        public IList<ParkingLayoutRuntimeInfo> ParkingLayouts { get; set; }
 
         public ControllerRuntimeConfigurationSnapshot()
         {
             Devices = new List<ReaderDeviceConfig>();
-            ParkingLayouts = new List<ParkingLayoutRuntimeInfo>();
         }
-    }
-
-    public sealed class ParkingLayoutRuntimeInfo
-    {
-        public string Code { get; set; }
-        public string Name { get; set; }
-        public string State { get; set; }
-        public int PublishedRevision { get; set; }
-        public IList<ParkingLaneRuntimeInfo> Lanes { get; set; }
-
-        public ParkingLayoutRuntimeInfo()
-        {
-            Lanes = new List<ParkingLaneRuntimeInfo>();
-        }
-    }
-
-    public sealed class ParkingLaneRuntimeInfo
-    {
-        public string Code { get; set; }
-        public string Name { get; set; }
     }
 
     public sealed class ControllerRuntimeContextSnapshot
     {
         public string Mode { get; set; }
-        public IList<ParkingLayoutRuntimeInfo> ParkingLayouts { get; set; }
         public LaneCalibrationSessionConfig LaneCalibration { get; set; }
 
         public ControllerRuntimeContextSnapshot()
         {
-            Mode = "Idle";
-            ParkingLayouts = new List<ParkingLayoutRuntimeInfo>();
+            Mode = "Acquisition";
         }
     }
 
@@ -93,6 +71,19 @@ namespace NSPGatekeeper.Controller.Domain
         public DateTime DiscoveredAtUtc { get; set; }
     }
 
+
+
+    public sealed class ReaderAppliedConfiguration
+    {
+        public string Source { get; set; }
+        public int PowerDbm { get; set; }
+        public int ReadIntervalMs { get; set; }
+        public int TidStartAddress { get; set; }
+        public int TidLength { get; set; }
+        public string ConfigHash { get; set; }
+        public DateTime AppliedAtUtc { get; set; }
+    }
+
     public sealed class ReaderStatus
     {
         // SerialNumber is always the physical SDK SerialNumber observed by Controller.
@@ -108,6 +99,12 @@ namespace NSPGatekeeper.Controller.Domain
         public string FirmwareVersion { get; set; }
         public int PowerDbm { get; set; }
         public int ReadIntervalMs { get; set; }
+        public int TidStartAddress { get; set; }
+        public int TidLength { get; set; }
+        public bool ConfigurationApplied { get; set; }
+        public string ConfigurationSource { get; set; }
+        public string AppliedConfigHash { get; set; }
+        public DateTime? ConfigurationAppliedAtUtc { get; set; }
         public DateTime UpdatedAtUtc { get; set; }
         public IList<int> Ports { get; set; }
 

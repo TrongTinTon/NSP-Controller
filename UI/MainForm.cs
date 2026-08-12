@@ -30,7 +30,6 @@ namespace NSPGatekeeper.Controller.UI
         private readonly CheckBox _discovery = new CheckBox();
         private readonly Label _connectionStatus = new Label();
         private readonly Label _modeStatus = new Label();
-        private readonly Label _parkingLayoutStatus = new Label();
         private readonly Label _laneCalibrationStatus = new Label();
         private readonly DataGridView _readerGrid = CreateGrid();
         private readonly Label _comPortStatus = new Label();
@@ -49,9 +48,9 @@ namespace NSPGatekeeper.Controller.UI
             _logger = logger;
 
             Text = "NSP Gatekeeper Controller";
-            Width = 1100;
-            Height = 720;
-            MinimumSize = new Size(900, 600);
+            Width = 1420;
+            Height = 760;
+            MinimumSize = new Size(1100, 640);
             StartPosition = FormStartPosition.CenterScreen;
 
             BuildUi();
@@ -126,13 +125,9 @@ namespace NSPGatekeeper.Controller.UI
             layout.Controls.Add(new Label { Text = "Runtime Mode", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 7);
             layout.Controls.Add(_modeStatus, 1, 7);
 
-            ConfigureRuntimeContextLabel(_parkingLayoutStatus);
-            layout.Controls.Add(new Label { Text = "Parking Layout", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 8);
-            layout.Controls.Add(_parkingLayoutStatus, 1, 8);
-
             ConfigureRuntimeContextLabel(_laneCalibrationStatus);
-            layout.Controls.Add(new Label { Text = "Lane Calibration", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 9);
-            layout.Controls.Add(_laneCalibrationStatus, 1, 9);
+            layout.Controls.Add(new Label { Text = "Lane Calibration", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 8);
+            layout.Controls.Add(_laneCalibrationStatus, 1, 8);
 
             var note = new Label
             {
@@ -140,8 +135,8 @@ namespace NSPGatekeeper.Controller.UI
                 MaximumSize = new Size(780, 0),
                 Text = "Runtime context is reported by Edge. Controller only connects Readers, applies Reader-level technical settings and forwards raw RFID observations."
             };
-            layout.Controls.Add(new Label(), 0, 10);
-            layout.Controls.Add(note, 1, 10);
+            layout.Controls.Add(new Label(), 0, 9);
+            layout.Controls.Add(note, 1, 9);
             tab.Controls.Add(layout);
             return tab;
         }
@@ -187,15 +182,45 @@ namespace NSPGatekeeper.Controller.UI
             });
             _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
             {
-                DataPropertyName = "Detail",
-                HeaderText = "Detail",
-                FillWeight = 38
+                DataPropertyName = "ConfigSource",
+                HeaderText = "Applied From",
+                FillWeight = 12
             });
             _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
             {
-                DataPropertyName = "LastUpdate",
-                HeaderText = "Last Update",
-                FillWeight = 16
+                DataPropertyName = "Power",
+                HeaderText = "RF Power",
+                FillWeight = 10
+            });
+            _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "ReadInterval",
+                HeaderText = "Read Interval",
+                FillWeight = 11
+            });
+            _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "TidStart",
+                HeaderText = "TID Start",
+                FillWeight = 8
+            });
+            _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "TidLength",
+                HeaderText = "TID Length",
+                FillWeight = 8
+            });
+            _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "AppliedAt",
+                HeaderText = "Applied At",
+                FillWeight = 15
+            });
+            _readerGrid.Columns.Add(new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = "Detail",
+                HeaderText = "Detail",
+                FillWeight = 20
             });
             _readerGrid.CellFormatting += delegate(object sender, DataGridViewCellFormattingEventArgs args)
             {
@@ -213,7 +238,7 @@ namespace NSPGatekeeper.Controller.UI
                 AutoSize = true,
                 Padding = new Padding(10, 6, 10, 8),
                 ForeColor = Color.DimGray,
-                Text = "This table shows only physical Readers actually observed through the SDK in the current Controller session. Server-configured Readers are not listed here."
+                Text = "Only physical Readers observed through the SDK are shown. Applied Configuration is last-confirmed after the SDK configuration call succeeds; offline Readers show the last confirmed values."
             };
 
             tab.Controls.Add(_readerGrid);
@@ -348,7 +373,6 @@ namespace NSPGatekeeper.Controller.UI
             _connectionStatus.Text = (_runtime.Running ? "Running" : "Stopped") + " | " + _runtime.ConnectionMessage;
             var runtimeContext = _runtime.RuntimeContext ?? new ControllerRuntimeContextSnapshot();
             _modeStatus.Text = runtimeContext.Mode ?? "Idle";
-            _parkingLayoutStatus.Text = FormatParkingLayouts(runtimeContext.ParkingLayouts);
             _laneCalibrationStatus.Text = FormatLaneCalibration(runtimeContext.LaneCalibration);
             try
             {
@@ -372,35 +396,6 @@ namespace NSPGatekeeper.Controller.UI
             _laneCalibrationGrid.DataSource = detections;
         }
 
-
-        private static string FormatParkingLayouts(IList<ParkingLayoutRuntimeInfo> layouts)
-        {
-            var rows = (layouts ?? new List<ParkingLayoutRuntimeInfo>())
-                .Where(value => value != null)
-                .Select(value =>
-                {
-                    var identity = string.IsNullOrWhiteSpace(value.Name)
-                        ? value.Code
-                        : value.Code + " · " + value.Name;
-                    var state = string.IsNullOrWhiteSpace(value.State)
-                        ? string.Empty
-                        : " · " + ToTitle(value.State);
-                    var revision = value.PublishedRevision > 0
-                        ? " · R" + value.PublishedRevision
-                        : string.Empty;
-                    var lanes = (value.Lanes ?? new List<ParkingLaneRuntimeInfo>())
-                        .Where(lane => lane != null && !string.IsNullOrWhiteSpace(lane.Code))
-                        .Select(lane => string.IsNullOrWhiteSpace(lane.Name)
-                            ? lane.Code
-                            : lane.Code + " (" + lane.Name + ")")
-                        .ToList();
-                    return identity + state + revision
-                        + (lanes.Count == 0 ? string.Empty : " · Lanes: " + string.Join(", ", lanes));
-                })
-                .Where(value => !string.IsNullOrWhiteSpace(value))
-                .ToList();
-            return rows.Count == 0 ? "None" : string.Join(Environment.NewLine, rows);
-        }
 
         private static string FormatLaneCalibration(LaneCalibrationSessionConfig calibration)
         {
@@ -474,10 +469,17 @@ namespace NSPGatekeeper.Controller.UI
                         ? status.DetectedEndpoint
                         : (status.Endpoint ?? string.Empty),
                     State = status.Online ? "Online" : "Detected",
+                    ConfigSource = status.ConfigurationApplied
+                        ? (status.ConfigurationSource ?? "Applied")
+                        : "Pending",
+                    Power = status.ConfigurationApplied ? status.PowerDbm + " dBm" : "—",
+                    ReadInterval = status.ConfigurationApplied ? status.ReadIntervalMs + " ms" : "—",
+                    TidStart = status.ConfigurationApplied ? status.TidStartAddress.ToString() : "—",
+                    TidLength = status.ConfigurationApplied ? status.TidLength.ToString() : "—",
+                    AppliedAt = status.ConfigurationAppliedAtUtc.HasValue
+                        ? status.ConfigurationAppliedAtUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                        : "—",
                     Detail = status.Message ?? string.Empty,
-                    LastUpdate = status.UpdatedAtUtc == DateTime.MinValue
-                        ? string.Empty
-                        : status.UpdatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
                     Online = status.Online
                 })
                 .ToList();
@@ -488,8 +490,13 @@ namespace NSPGatekeeper.Controller.UI
                     row.DetectedSerialNumber + ";"
                     + row.Connection + ";"
                     + row.State + ";"
-                    + row.Detail + ";"
-                    + row.LastUpdate));
+                    + row.ConfigSource + ";"
+                    + row.Power + ";"
+                    + row.ReadInterval + ";"
+                    + row.TidStart + ";"
+                    + row.TidLength + ";"
+                    + row.AppliedAt + ";"
+                    + row.Detail));
             if (string.Equals(signature, _readerRowsSignature, StringComparison.Ordinal)) return;
 
             _readerGrid.DataSource = new BindingList<ReaderUiRow>(rows);
@@ -547,8 +554,13 @@ namespace NSPGatekeeper.Controller.UI
             public string DetectedSerialNumber { get; set; }
             public string Connection { get; set; }
             public string State { get; set; }
+            public string ConfigSource { get; set; }
+            public string Power { get; set; }
+            public string ReadInterval { get; set; }
+            public string TidStart { get; set; }
+            public string TidLength { get; set; }
+            public string AppliedAt { get; set; }
             public string Detail { get; set; }
-            public string LastUpdate { get; set; }
             public bool Online { get; set; }
         }
 

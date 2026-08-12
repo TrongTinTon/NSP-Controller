@@ -1,19 +1,27 @@
-NSP Controller 1.4.17 validation scope
+NSP Controller 1.4.21 validation scope
 
-- Vendor C# package and UHFReader288.DLL manual V2.1 reviewed.
-- x86 and x64 UHFReader288.dll files are managed .NET assemblies.
-- Vendor SDK loading, method lookup, callback adaptation and connection state are isolated under Readers/CFE718/Sdk.
-- Factory, discovery, identity, Reader-level technical configuration, inventory and runtime lifecycle are separated by responsibility.
-- Controller discovers and reports physical Readers without business validation.
-- Reader-wide power_dbm is applied through the scalar SetRfPower overload (0-33 dBm).
-- No per-port antenna power, antenna topology, or antenna routing command exists in Controller runtime.
-- port_no is sourced from the SDK callback and is not replaced with the acquisition-loop port.
-- Lane Calibration status ready and running are both active Controller runtime states.
-- Terminal Lane Calibration statuses cannot be reactivated by a stale desired_state value.
-- Controller UI refreshes after every Lane Calibration pull result is applied or cleared.
-- Edge remains responsible for the ready-to-running business transition after the first accepted raw event.
-- Static source/XML/package validation only; Windows .NET Framework 4.8 MSBuild and physical Reader tests are still required.
+Architecture
+- Controller is Acquisition / Execution only.
+- Normal RFID acquisition forwards every valid physical observation to the Parking raw-detection outbox.
+- Calibration acquisition is an explicit execution scope supplied by Edge.
+- Calibration routing is per-Reader: only Reader SDK Serials explicitly listed in the active Calibration Session are routed to the Calibration outbox.
+- Other Readers continue normal raw acquisition while Calibration is active.
+- Parking and Calibration outboxes drain independently.
+- Controller does not receive/cache/evaluate Parking Layout, logical Lane, Antenna Sequence, direction, Check-in/Check-out, Vehicle/User authorization or Parking Transaction state.
+- Controller never filters raw detections by a business Port/Antenna whitelist.
 
-- Idle detections are not queued or pushed to Parking.
-- Parking outbox is transmitted only while Parking runtime is active.
-- Core API nested business envelopes are unwrapped before runtime state parsing.
+Reader execution
+- Reader-wide RF power is applied through SetRfPower.
+- Read interval is applied through SetInventoryScanTime.
+- TID start/length are active Inventory_G2 request parameters.
+- No per-port antenna power/topology/routing command exists in Controller runtime.
+- Applied configuration is recorded only after the SDK configuration call succeeds.
+- Reader UI shows last-confirmed Applied From, RF Power, effective Read Interval, TID Start, TID Length and Applied At.
+
+Calibration safety
+- Calibration execution lease defaults to 30 seconds and is refreshed by successful Edge pulls.
+- Lease expiry clears only the execution context and returns Readers to normal acquisition.
+
+Validation limits
+- Static source/contract/XML/package validation performed.
+- Windows .NET Framework 4.8 MSBuild and physical CF-E718 Reader tests are still required.

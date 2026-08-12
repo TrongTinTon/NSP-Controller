@@ -50,6 +50,12 @@ namespace NSPGatekeeper.Controller.Bootstrap
 
                 var store = new LocalStore(settings.PostgreSqlConnectionString, logger);
                 store.EnsureSchema();
+                var recoveredGatewayDetections = store.RequeueGatewayConfigurationFailures();
+                if (recoveredGatewayDetections > 0)
+                    logger.Warn(
+                        "parking-push",
+                        "Recovered RFID detections previously dead-lettered by an Edge Gateway configuration error",
+                        "count=" + recoveredGatewayDetections);
                 store.MarkReaderRuntimeStatusesOffline();
 
                 var registry = new ReaderDriverRegistry();

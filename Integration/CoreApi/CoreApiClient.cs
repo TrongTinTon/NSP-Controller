@@ -101,7 +101,16 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
         public bool IsPermanentRequestError(Exception error)
         {
             var http = error as CoreApiHttpException;
-            return http != null && http.StatusCode >= 400 && http.StatusCode < 500 &&
+            if (http == null) return false;
+
+            // A missing Gateway Server Action is an Edge/Core API deployment
+            // configuration failure, not an invalid RFID payload. Keep the durable
+            // outbox item pending so it can be retried after Edge is repaired.
+            if (http.StatusCode == 400 &&
+                http.Message.IndexOf("no Server Action configured", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            return http.StatusCode >= 400 && http.StatusCode < 500 &&
                    http.StatusCode != 401 && http.StatusCode != 408 && http.StatusCode != 429;
         }
 

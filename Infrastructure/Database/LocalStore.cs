@@ -327,6 +327,27 @@ SELECT id, event_uid, serial_number, port_no, tid, detected_at, attempts
                 delegate(NpgsqlCommand cmd) { AddText(cmd, "error", error ?? "permanent_error"); });
         }
 
+        public int RequeueGatewayConfigurationFailures()
+        {
+            // 1.4.22 treated every HTTP 400 (except explicit transient codes) as
+            // permanent. t4_coreapi can return HTTP 400 when an existing Gateway
+            // route has lost its Server Action, which is a server deployment fault.
+            // Recover only that exact class of dead record; payload-validation 400s
+            // remain dead and require operator review.
+            const string sql = @"
+UPDATE controller_parking_outbox
+   SET status='pending',
+       attempts=0,
+       next_attempt_at=NOW(),
+       last_error=NULL,
+       sent_at=NULL
+ WHERE status='dead'
+   AND last_error ILIKE '%no Server Action configured%'";
+            using (var conn = Open())
+            using (var cmd = new NpgsqlCommand(sql, conn))
+                return cmd.ExecuteNonQuery();
+        }
+
         public void MarkFailed(IList<long> ids, string error, int attempts)
         {
             var delaySeconds = RetryDelaySeconds(attempts);

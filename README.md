@@ -181,3 +181,8 @@ Lane Calibration Reader-wide power and scan interval changes are applied on the 
 - Reader UI shows the last configuration confirmed after SDK apply succeeds: source, RF power, effective scan interval, TID start/length and applied timestamp.
 - Desired/effective configuration is no longer presented as if it were physically applied.
 - Controller remains acquisition/execution only; Parking Layout, Lane matching and Parking business stay on Edge.
+
+
+## Reader status timeout isolation (1.4.22)
+
+Controller now reports Core API request timeouts explicitly. Pair with `nsp_business_gatekeeper 19.0.10.32.0`, where `/devices/report` is the single Reader Observation writer and Parking/Calibration raw acquisition no longer competes for the same observation row lock.

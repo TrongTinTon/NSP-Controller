@@ -561,6 +561,17 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 {
                     throw;
                 }
+                catch (TaskCanceledException ex)
+                {
+                    // HttpClient surfaces its request timeout as TaskCanceledException.
+                    // Report the real condition instead of incorrectly calling every
+                    // timeout a connection failure.
+                    throw new TimeoutException(
+                        "Core API request timed out after "
+                        + Math.Max(3, _settings.CoreApiTimeoutSec)
+                        + "s: " + url,
+                        ex);
+                }
                 catch (Exception ex)
                 {
                     throw new HttpRequestException("Cannot connect to " + url + ": " + DescribeException(ex), ex);

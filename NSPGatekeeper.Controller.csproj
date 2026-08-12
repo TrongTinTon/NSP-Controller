@@ -6,9 +6,9 @@
     <RootNamespace>NSPGatekeeper.Controller</RootNamespace>
     <AssemblyName>NSPGatekeeper.Controller</AssemblyName>
     <LangVersion>7.3</LangVersion>
-    <Version>1.4.21</Version>
-    <FileVersion>1.4.21.0</FileVersion>
-    <AssemblyVersion>1.4.21.0</AssemblyVersion>
+    <Version>1.4.22</Version>
+    <FileVersion>1.4.22.0</FileVersion>
+    <AssemblyVersion>1.4.22.0</AssemblyVersion>
     <Platforms>x86;x64</Platforms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>

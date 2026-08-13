@@ -230,6 +230,26 @@ namespace NSPGatekeeper.Controller.Services
                 // Only matching SDK Serials receive Calibration acquisition parameters.
                 _readers.ApplyLaneCalibrationConfiguration(config);
                 NotifyStateChanged();
+
+                // Released is represented as Edge status=ready. Once the Controller
+                // has accepted and applied the execution scope, report running
+                // immediately instead of waiting for the first RFID detection.
+                // If the acknowledgement is lost, the next pull still returns ready
+                // and retries this idempotent transition.
+                if (string.Equals(config.Status, "ready", StringComparison.OrdinalIgnoreCase))
+                {
+                    _coreApi.ReportLaneCalibrationStatus(
+                        config.LaneCalibrationCode,
+                        config.Revision,
+                        "running",
+                        DateTime.UtcNow,
+                        "Lane Calibration acquisition mode applied by Controller.");
+                    if (_logger != null)
+                        _logger.Info(
+                            "lane-calibration-status",
+                            "Lane Calibration running status acknowledged by Edge",
+                            "code=" + config.LaneCalibrationCode + "; revision=" + config.Revision);
+                }
             }
             catch
             {
@@ -300,36 +320,22 @@ namespace NSPGatekeeper.Controller.Services
 
             try
             {
-                var ack = _coreApi.PushLaneCalibrationEvents(
+                _coreApi.PushLaneCalibrationEvents(
                     laneCalibrationCode,
                     sameSession.Select(x => x.Event).ToList());
+
+                // Transport ACK only: a successful Core API call means Edge received
+                // the complete submitted batch. Edge/Cloud own validation, idempotency,
+                // filtering, persistence and synchronization decisions.
                 _store.MarkLaneCalibrationSent(ids);
+
                 if (_logger != null)
-                {
-                    var detail = "code=" + laneCalibrationCode
-                        + "; sent=" + ids.Count
-                        + "; edge_received=" + ack.Received
-                        + "; edge_stored=" + ack.Stored
-                        + "; edge_duplicates=" + ack.Duplicates
-                        + "; edge_ignored=" + ack.Ignored
-                        + "; edge_rejected=" + ack.Rejected
-                        + "; http=200";
-                    if (ack.Stored < 0)
-                        _logger.Warn(
-                            "lane-calibration-push",
-                            "Lane Calibration batch acknowledged by an older Edge without storage counters",
-                            detail);
-                    else if (ack.Rejected > 0 || ack.Ignored > 0)
-                        _logger.Warn(
-                            "lane-calibration-push",
-                            "Lane Calibration batch acknowledged with Edge-side decisions",
-                            detail);
-                    else
-                        _logger.Info(
-                            "lane-calibration-push",
-                            "Lane Calibration raw event batch stored by Edge",
-                            detail);
-                }
+                    _logger.Info(
+                        "lane-calibration-push",
+                        "Lane Calibration raw event batch acknowledged",
+                        "code=" + laneCalibrationCode
+                        + "; count=" + ids.Count
+                        + "; http=200");
             }
             catch (Exception ex)
             {

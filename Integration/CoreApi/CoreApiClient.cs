@@ -22,6 +22,7 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
     {
         private const string LaneCalibrationPullRoute = "controller/lane-calibrations/pull";
         private const string LaneCalibrationEventsRoute = "controller/lane-calibrations/events";
+        private const string LaneCalibrationStatusRoute = "controller/lane-calibrations/status";
         private readonly AppSettings _settings;
         private readonly FileLogger _logger;
         private readonly ZeroconfDiscoveryClient _discovery;
@@ -308,20 +309,29 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
             return config;
         }
 
-        public LaneCalibrationPushAck PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
+        public void PushLaneCalibrationEvents(string laneCalibrationCode, IList<LaneCalibrationEvent> events)
         {
-            if (events == null || events.Count == 0)
-                return new LaneCalibrationPushAck { LaneCalibrationCode = laneCalibrationCode };
+            if (events == null || events.Count == 0) return;
+            if (string.IsNullOrWhiteSpace(laneCalibrationCode))
+                throw new ArgumentException("Lane Calibration code is required.", "laneCalibrationCode");
+
             var items = new JArray();
             foreach (var item in events)
             {
+                if (item == null)
+                    throw new InvalidOperationException("Lane Calibration event cannot be null.");
+
+                var serialNumber = NormalizeSerial(item.SerialNumber);
+                if (string.IsNullOrWhiteSpace(serialNumber))
+                    throw new InvalidOperationException("Lane Calibration event requires serial_number.");
+
                 var payload = new JObject
                 {
                     ["event_uid"] = item.EventUid,
                     ["revision"] = Math.Max(1, item.Revision),
-                    ["power_dbm"] = Math.Max(0, item.PowerDbm),
-                    ["read_interval_ms"] = Math.Max(1, Math.Min(60000, item.ReadIntervalMs)),
-                    ["serial_number"] = item.SerialNumber,
+                    ["power_dbm"] = Clamp(item.PowerDbm, 0, 40),
+                    ["read_interval_ms"] = Clamp(item.ReadIntervalMs, 1, 60000),
+                    ["serial_number"] = serialNumber,
                     ["port_no"] = item.PortNo,
                     ["tid"] = item.Tid,
                     ["read_at"] = item.ReadAtUtc.ToUniversalTime().ToString("o")
@@ -330,44 +340,37 @@ namespace NSPGatekeeper.Controller.Integration.CoreApi
                 items.Add(payload);
             }
 
-            var response = PostAuthenticated(LaneCalibrationEventsRoute, new JObject
+            if (items.Count == 0) return;
+
+            // Transport acknowledgement is the complete Controller contract.
+            // A successful HTTP/Core API response means Edge received the batch.
+            // Validation, idempotency, filtering, persistence and Cloud sync are Edge-owned.
+            PostAuthenticated(LaneCalibrationEventsRoute, new JObject
             {
                 ["controller_code"] = _settings.ControllerCode,
-                ["lane_calibration_code"] = laneCalibrationCode,
+                ["lane_calibration_code"] = laneCalibrationCode.Trim().ToUpperInvariant(),
                 ["events"] = items
             });
+        }
 
-            var data = ExtractBusinessData(response, "Lane Calibration Edge acknowledgement");
-            if (data == null || data["received"] == null)
-            {
-                // Backward compatibility with an older Edge that returned only
-                // a transport-level HTTP 200 acknowledgement.
-                return new LaneCalibrationPushAck
-                {
-                    LaneCalibrationCode = laneCalibrationCode,
-                    Received = events.Count,
-                    Stored = -1,
-                    Duplicates = -1,
-                    Ignored = -1,
-                    Rejected = -1,
-                };
-            }
+        public void ReportLaneCalibrationStatus(
+            string laneCalibrationCode, int revision, string status, DateTime occurredAtUtc, string message)
+        {
+            if (string.IsNullOrWhiteSpace(laneCalibrationCode))
+                throw new ArgumentException("Lane Calibration code is required.", "laneCalibrationCode");
+            if (string.IsNullOrWhiteSpace(status))
+                throw new ArgumentException("Lane Calibration status is required.", "status");
 
-            var ack = new LaneCalibrationPushAck
+            var payload = new JObject
             {
-                LaneCalibrationCode = Clean((string)data["lane_calibration_code"]) ?? laneCalibrationCode,
-                Received = data.Value<int?>("received") ?? -1,
-                Stored = data.Value<int?>("stored") ?? -1,
-                Duplicates = data.Value<int?>("duplicates") ?? 0,
-                Ignored = data.Value<int?>("ignored") ?? 0,
-                Rejected = data.Value<int?>("rejected") ?? 0,
+                ["controller_code"] = _settings.ControllerCode,
+                ["lane_calibration_code"] = laneCalibrationCode.Trim().ToUpperInvariant(),
+                ["revision"] = Math.Max(1, revision),
+                ["status"] = status.Trim().ToLowerInvariant(),
+                ["occurred_at"] = occurredAtUtc.ToUniversalTime().ToString("o")
             };
-            if (ack.Received >= 0 && ack.Received != events.Count)
-                throw new InvalidOperationException(
-                    "Lane Calibration Edge acknowledgement count mismatch. sent="
-                    + events.Count.ToString(CultureInfo.InvariantCulture)
-                    + "; received=" + ack.Received.ToString(CultureInfo.InvariantCulture));
-            return ack;
+            if (!string.IsNullOrWhiteSpace(message)) payload["message"] = message.Trim();
+            PostAuthenticated(LaneCalibrationStatusRoute, payload);
         }
 
         private void AuthenticateWithDiscoveryFallback(Exception firstError)
